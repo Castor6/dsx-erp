@@ -1,0 +1,62 @@
+from __future__ import annotations
+
+from pydantic import BaseModel
+from typing import Optional, List
+from datetime import datetime
+from app.models.product import SaleType
+
+
+class ProductBase(BaseModel):
+    name: str
+    sku: str
+    sale_type: SaleType
+    image_url: Optional[str] = None
+    warehouse_id: int
+    packaging_id: Optional[int] = None
+
+
+class ProductCreate(ProductBase):
+    pass
+
+
+class ProductUpdate(BaseModel):
+    name: Optional[str] = None
+    sku: Optional[str] = None
+    sale_type: Optional[SaleType] = None
+    image_url: Optional[str] = None
+    warehouse_id: Optional[int] = None
+    packaging_id: Optional[int] = None
+
+
+class Product(ProductBase):
+    id: int
+    created_at: datetime
+    updated_at: Optional[datetime] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProductWithWarehouse(Product):
+    warehouse: Optional[Warehouse] = None
+    packaging: Optional[Product] = None
+
+    class Config:
+        from_attributes = True
+
+
+class ProductListResponse(BaseModel):
+    """商品列表响应，包含分页信息"""
+    items: List[ProductWithWarehouse]
+    total: int
+    skip: int
+    limit: int
+    has_more: bool
+
+    class Config:
+        from_attributes = True
+
+
+# 延迟导入解决循环依赖
+from app.schemas.warehouse import Warehouse
+ProductWithWarehouse.model_rebuild()
