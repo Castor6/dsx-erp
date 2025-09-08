@@ -3,7 +3,9 @@
 /backend/__pycache__/
 /backend/*.pyc
 /backend/.env
-backend/alembic
+backend/alembic/
+backend/logs/
+backend/uploads/
 
 # 如果你不想忽略 alembic，请删掉下面这条
 #/backend/alembic/
