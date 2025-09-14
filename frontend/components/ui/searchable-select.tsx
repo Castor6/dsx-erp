@@ -120,21 +120,29 @@ const SearchableSelect: React.FC<SearchableSelectProps> = ({
     return () => document.removeEventListener('mousedown', handleClickOutside)
   }, [])
 
-  // 根据value查找对应的选项
+  // 根据 value 查找对应的选项；若未能命中，则在未展开时也主动加载初始选项以确保回显
   useEffect(() => {
-    if (value) {
-      // 优先从搜索结果中查找，再从初始选项中查找
-      let option = options.find(opt => opt.id === value)
-      if (!option && initialOptions.length > 0) {
-        option = initialOptions.find(opt => opt.id === value)
-      }
-      if (option) {
-        setSelectedOption(option)
-      }
-    } else {
+    if (value === null || value === undefined) {
       setSelectedOption(null)
+      return
     }
-  }, [value, options, initialOptions])
+
+    // 优先从现有列表中匹配
+    let option = options.find(opt => opt.id === value)
+    if (!option && initialOptions.length > 0) {
+      option = initialOptions.find(opt => opt.id === value)
+    }
+    if (option) {
+      setSelectedOption(option)
+      return
+    }
+
+    // 若尚未加载到任何初始选项，则主动加载一次以解析已选中值
+    if (!initialLoading && initialOptions.length === 0) {
+      // 不需要等待完成；加载完成后本 effect 会因 initialOptions 变化而再次运行
+      loadInitialOptions()
+    }
+  }, [value, options, initialOptions, initialLoading])
 
   const handleSelect = (option: Option) => {
     setSelectedOption(option)

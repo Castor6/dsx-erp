@@ -48,6 +48,36 @@ export interface Warehouse {
   updated_at?: string
 }
 
+// 包材关系相关类型
+export interface PackagingRelation {
+  packaging_id: number
+  quantity: number
+}
+
+export interface ProductPackagingRelation extends PackagingRelation {
+  id: number
+  product_id: number
+  created_at: string
+  packaging_name?: string
+  packaging_sku?: string
+}
+
+export interface ComboItemPackagingRelation extends PackagingRelation {
+  id: number
+  combo_product_item_id: number
+  created_at: string
+  packaging_name?: string
+  packaging_sku?: string
+}
+
+export interface ComboProductPackagingRelation extends PackagingRelation {
+  id: number
+  combo_product_id: number
+  created_at: string
+  packaging_name?: string
+  packaging_sku?: string
+}
+
 // 商品相关类型
 export interface Product {
   id: number
@@ -56,9 +86,9 @@ export interface Product {
   sale_type: '商品' | '包材'
   image_url?: string
   warehouse_id: number
-  packaging_id?: number
   created_at: string
   updated_at?: string
+  packaging_relations?: ProductPackagingRelation[]
 }
 
 // 采购订单相关类型
@@ -158,6 +188,7 @@ export interface ComboProduct {
   created_at: string
   updated_at?: string
   combo_items: ComboProductItem[]
+  packaging_relations?: ComboProductPackagingRelation[]
 }
 
 export interface ComboProductItem {
@@ -168,6 +199,7 @@ export interface ComboProductItem {
   created_at: string
   base_product_name?: string
   base_product_sku?: string
+  packaging_relations?: ComboItemPackagingRelation[]
 }
 
 export interface ComboInventoryRecord {
@@ -191,9 +223,11 @@ export interface ComboProductCreateForm {
   image_url?: string
   notes?: string
   combo_items: ComboProductItemForm[]
+  packaging_relations: PackagingRelation[]
 }
 
 export interface ComboProductItemForm {
   base_product_id: number | null
   quantity: number
+  packaging_relations?: PackagingRelation[]
 }

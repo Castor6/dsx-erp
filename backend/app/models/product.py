@@ -19,13 +19,11 @@ class Product(Base):
     sale_type = Column(Enum(SaleType), nullable=False)
     image_url = Column(String(500), nullable=True)
     warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=False)
-    packaging_id = Column(Integer, ForeignKey("products.id"), nullable=True)  # 自关联包材
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # 关系
     warehouse = relationship("Warehouse", back_populates="products")
-    packaging = relationship("Product", remote_side=[id])  # 自关联包材
     
     # 库存记录
     inventory_records = relationship("InventoryRecord", back_populates="product")
@@ -35,3 +33,6 @@ class Product(Base):
     
     # 供货关系
     supplier_products = relationship("SupplierProduct", back_populates="product")
+    
+    # 包材关系 (多对多)
+    packaging_relations = relationship("ProductPackagingRelation", foreign_keys="ProductPackagingRelation.product_id", back_populates="product", cascade="all, delete-orphan")

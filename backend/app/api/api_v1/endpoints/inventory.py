@@ -10,6 +10,7 @@ from app.core.security import get_current_active_user
 from app.models.user import User
 from app.models.inventory import InventoryRecord, InventoryTransaction, InventoryStatus
 from app.models.product import Product, SaleType
+from app.models.packaging_relation import ProductPackagingRelation, ComboProductPackagingRelation, ComboItemPackagingRelation
 from app.models.warehouse import Warehouse
 from app.models.combo_product import ComboProduct, ComboProductItem, ComboInventoryRecord, ComboInventoryTransaction
 from app.schemas.inventory import (
@@ -186,36 +187,81 @@ async def package_products(
         )
     
     # 检查是否是商品类型（需要消耗包材）
-    if product.sale_type == SaleType.PRODUCT and product.packaging_id:
-        # 检查包材库存
-        packaging_result = await db.execute(
-            select(InventoryRecord).where(
-                InventoryRecord.product_id == product.packaging_id,
-                InventoryRecord.warehouse_id == request.warehouse_id
-            )
+    if product.sale_type == SaleType.PRODUCT:
+        # 先查询商品的包材关系
+        packaging_relations_result = await db.execute(
+            select(ProductPackagingRelation)
+            .options(selectinload(ProductPackagingRelation.packaging))
+            .where(ProductPackagingRelation.product_id == product.id)
         )
-        packaging_inventory = packaging_result.scalar_one_or_none()
+        packaging_relations = packaging_relations_result.scalars().all()
         
-        if not packaging_inventory or packaging_inventory.semi_finished < request.quantity:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="包材半成品库存不足"
+        # 如果有新的包材关系，使用新的多包材逻辑
+        if packaging_relations:
+            for relation in packaging_relations:
+                needed_quantity = relation.quantity * request.quantity
+                
+                # 检查包材库存
+                packaging_result = await db.execute(
+                    select(InventoryRecord).where(
+                        InventoryRecord.product_id == relation.packaging_id,
+                        InventoryRecord.warehouse_id == request.warehouse_id
+                    )
+                )
+                packaging_inventory = packaging_result.scalar_one_or_none()
+                
+                if not packaging_inventory or packaging_inventory.semi_finished < needed_quantity:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"包材 {relation.packaging.name} 半成品库存不足，需要 {needed_quantity}，现有 {packaging_inventory.semi_finished if packaging_inventory else 0}"
+                    )
+                
+                # 消耗包材半成品
+                packaging_inventory.semi_finished -= needed_quantity
+                
+                # 记录包材消耗
+                await _create_inventory_transaction(
+                    db,
+                    product_id=relation.packaging_id,
+                    warehouse_id=request.warehouse_id,
+                    transaction_type="包材消耗",
+                    from_status=InventoryStatus.SEMI_FINISHED,
+                    to_status=None,
+                    quantity=-needed_quantity,
+                    notes=f"用于打包商品 {product.sku}，单件需要 {relation.quantity} 个"
+                )
+        
+        # 向后兼容：如果没有新的包材关系但有旧的packaging_id，使用旧逻辑
+        elif product.packaging_id:
+            # 检查包材库存
+            packaging_result = await db.execute(
+                select(InventoryRecord).where(
+                    InventoryRecord.product_id == product.packaging_id,
+                    InventoryRecord.warehouse_id == request.warehouse_id
+                )
             )
-        
-        # 消耗包材半成品
-        packaging_inventory.semi_finished -= request.quantity
-        
-        # 记录包材消耗
-        await _create_inventory_transaction(
-            db,
-            product_id=product.packaging_id,
-            warehouse_id=request.warehouse_id,
-            transaction_type="包材消耗",
-            from_status=InventoryStatus.SEMI_FINISHED,
-            to_status=None,
-            quantity=-request.quantity,
-            notes=f"用于打包商品 {product.sku}"
-        )
+            packaging_inventory = packaging_result.scalar_one_or_none()
+            
+            if not packaging_inventory or packaging_inventory.semi_finished < request.quantity:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail="包材半成品库存不足"
+                )
+            
+            # 消耗包材半成品
+            packaging_inventory.semi_finished -= request.quantity
+            
+            # 记录包材消耗
+            await _create_inventory_transaction(
+                db,
+                product_id=product.packaging_id,
+                warehouse_id=request.warehouse_id,
+                transaction_type="包材消耗",
+                from_status=InventoryStatus.SEMI_FINISHED,
+                to_status=None,
+                quantity=-request.quantity,
+                notes=f"用于打包商品 {product.sku}"
+            )
     
     # 转移商品库存：半成品 -> 成品
     await _transfer_inventory(
@@ -395,7 +441,13 @@ async def get_combo_inventory_records(
         selectinload(ComboInventoryRecord.combo_product)
             .selectinload(ComboProduct.combo_items)
             .selectinload(ComboProductItem.base_product),
-        selectinload(ComboInventoryRecord.combo_product).selectinload(ComboProduct.packaging),
+        selectinload(ComboInventoryRecord.combo_product)
+            .selectinload(ComboProduct.combo_items)
+            .selectinload(ComboProductItem.packaging_relations)
+            .selectinload(ComboItemPackagingRelation.packaging),
+        selectinload(ComboInventoryRecord.combo_product)
+            .selectinload(ComboProduct.packaging_relations)
+            .selectinload(ComboProductPackagingRelation.packaging),
         selectinload(ComboInventoryRecord.warehouse)
     ).join(ComboProduct)
     
@@ -474,7 +526,13 @@ async def get_warehouse_combo_inventory(
             selectinload(ComboInventoryRecord.combo_product)
                 .selectinload(ComboProduct.combo_items)
                 .selectinload(ComboProductItem.base_product),
-            selectinload(ComboInventoryRecord.combo_product).selectinload(ComboProduct.packaging),
+            selectinload(ComboInventoryRecord.combo_product)
+                .selectinload(ComboProduct.combo_items)
+                .selectinload(ComboProductItem.packaging_relations)
+                .selectinload(ComboItemPackagingRelation.packaging),
+            selectinload(ComboInventoryRecord.combo_product)
+                .selectinload(ComboProduct.packaging_relations)
+                .selectinload(ComboProductPackagingRelation.packaging),
             selectinload(ComboInventoryRecord.warehouse)
         )
         .where(ComboInventoryRecord.warehouse_id == warehouse_id)
@@ -519,7 +577,13 @@ async def get_combo_inventory_summary(
             selectinload(ComboInventoryRecord.combo_product)
                 .selectinload(ComboProduct.combo_items)
                 .selectinload(ComboProductItem.base_product),
-            selectinload(ComboInventoryRecord.combo_product).selectinload(ComboProduct.packaging),
+            selectinload(ComboInventoryRecord.combo_product)
+                .selectinload(ComboProduct.combo_items)
+                .selectinload(ComboProductItem.packaging_relations)
+                .selectinload(ComboItemPackagingRelation.packaging),
+            selectinload(ComboInventoryRecord.combo_product)
+                .selectinload(ComboProduct.packaging_relations)
+                .selectinload(ComboProductPackagingRelation.packaging),
             selectinload(ComboInventoryRecord.warehouse)
         )
     )
@@ -559,7 +623,7 @@ async def get_combo_inventory_summary(
 
 
 async def _calculate_available_to_assemble(combo_product: ComboProduct, warehouse_id: int, db: AsyncSession) -> int:
-    """计算可组合数量（基于基础商品半成品库存 + 组合商品包材半成品库存计算）"""
+    """计算可组合数量（基于基础商品半成品库存 + 基础商品包材 + 组合商品包材半成品库存计算）"""
     if not combo_product.combo_items:
         return 0
     
@@ -584,22 +648,48 @@ async def _calculate_available_to_assemble(combo_product: ComboProduct, warehous
         # 计算这个基础商品的半成品可以支持多少个组合商品
         available_for_this_item = base_inventory.semi_finished // item.quantity
         min_available = min(min_available, available_for_this_item)
+        
+        # 检查基础商品在此组合中配置的包材限制
+        if hasattr(item, 'packaging_relations') and item.packaging_relations:
+            for packaging_relation in item.packaging_relations:
+                packaging_inventory_result = await db.execute(
+                    select(InventoryRecord).where(
+                        and_(
+                            InventoryRecord.product_id == packaging_relation.packaging_id,
+                            InventoryRecord.warehouse_id == warehouse_id
+                        )
+                    )
+                )
+                packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+                
+                if not packaging_inventory:
+                    return 0
+                
+                # 计算这个包材可以支持多少个基础商品
+                base_product_quantity_from_packaging = packaging_inventory.semi_finished // packaging_relation.quantity
+                # 再计算这些基础商品可以支持多少个组合商品
+                available_from_packaging = base_product_quantity_from_packaging // item.quantity
+                min_available = min(min_available, available_from_packaging)
     
-    # 2. 检查组合商品包材的半成品库存限制
-    packaging_inventory_result = await db.execute(
-        select(InventoryRecord).where(
-            and_(
-                InventoryRecord.product_id == combo_product.packaging_id,
-                InventoryRecord.warehouse_id == warehouse_id
+    # 2. 检查组合商品本身的包材半成品库存限制
+    # 优先使用新的多包材关系
+    if combo_product.packaging_relations:
+        for packaging_relation in combo_product.packaging_relations:
+            packaging_inventory_result = await db.execute(
+                select(InventoryRecord).where(
+                    and_(
+                        InventoryRecord.product_id == packaging_relation.packaging_id,
+                        InventoryRecord.warehouse_id == warehouse_id
+                    )
+                )
             )
-        )
-    )
-    packaging_inventory = packaging_inventory_result.scalar_one_or_none()
-    
-    if not packaging_inventory:
-        return 0
-    
-    # 包材库存限制组合数量（每个组合商品需要1个包材）
-    min_available = min(min_available, packaging_inventory.semi_finished)
+            packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+            
+            if not packaging_inventory:
+                return 0
+            
+            # 计算这个包材可以支持多少个组合商品
+            available_from_combo_packaging = packaging_inventory.semi_finished // packaging_relation.quantity
+            min_available = min(min_available, available_from_combo_packaging)
     
     return int(min_available) if min_available != float('inf') else 0

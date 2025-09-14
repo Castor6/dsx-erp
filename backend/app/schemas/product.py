@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from typing import Optional, List
 from datetime import datetime
 from app.models.product import SaleType
+from app.schemas.packaging_relation import ProductPackagingRelationCreate, ProductPackagingRelation
 
 
 class ProductBase(BaseModel):
@@ -12,11 +13,10 @@ class ProductBase(BaseModel):
     sale_type: SaleType
     image_url: Optional[str] = None
     warehouse_id: int
-    packaging_id: Optional[int] = None
 
 
 class ProductCreate(ProductBase):
-    pass
+    packaging_relations: Optional[List[ProductPackagingRelationCreate]] = []
 
 
 class ProductUpdate(BaseModel):
@@ -25,7 +25,7 @@ class ProductUpdate(BaseModel):
     sale_type: Optional[SaleType] = None
     image_url: Optional[str] = None
     warehouse_id: Optional[int] = None
-    packaging_id: Optional[int] = None
+    packaging_relations: Optional[List[ProductPackagingRelationCreate]] = None
 
 
 class Product(ProductBase):
@@ -39,7 +39,8 @@ class Product(ProductBase):
 
 class ProductWithWarehouse(Product):
     warehouse: Optional[Warehouse] = None
-    packaging: Optional[Product] = None
+    packaging: Optional[Product] = None  # 保留用于向后兼容
+    packaging_relations: List[ProductPackagingRelation] = []
 
     class Config:
         from_attributes = True

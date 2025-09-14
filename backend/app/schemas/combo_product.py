@@ -1,6 +1,7 @@
 from typing import List, Optional
 from pydantic import BaseModel
 from datetime import datetime
+from app.schemas.packaging_relation import ComboProductPackagingRelationCreate, ComboProductPackagingRelation, ComboItemPackagingRelationCreate, ComboItemPackagingRelation
 
 
 # 组合商品明细相关Schema
@@ -10,11 +11,11 @@ class ComboProductItemBase(BaseModel):
 
 
 class ComboProductItemCreate(ComboProductItemBase):
-    pass
+    packaging_relations: Optional[List[ComboItemPackagingRelationCreate]] = []
 
 
 class ComboProductItemUpdate(ComboProductItemBase):
-    pass
+    packaging_relations: Optional[List[ComboItemPackagingRelationCreate]] = None
 
 
 class ComboProductItem(ComboProductItemBase):
@@ -25,6 +26,9 @@ class ComboProductItem(ComboProductItemBase):
     # 关联的基础商品信息
     base_product_name: Optional[str] = None
     base_product_sku: Optional[str] = None
+    
+    # 基础商品在此组合中的包材配置
+    packaging_relations: List[ComboItemPackagingRelation] = []
 
     class Config:
         from_attributes = True
@@ -35,19 +39,19 @@ class ComboProductBase(BaseModel):
     name: str
     sku: str
     warehouse_id: int
-    packaging_id: int
 
 
 class ComboProductCreate(ComboProductBase):
     combo_items: List[ComboProductItemCreate]  # 组合明细
+    packaging_relations: Optional[List[ComboProductPackagingRelationCreate]] = []
 
 
 class ComboProductUpdate(BaseModel):
     name: Optional[str] = None
     sku: Optional[str] = None
     warehouse_id: Optional[int] = None
-    packaging_id: Optional[int] = None
     combo_items: Optional[List[ComboProductItemCreate]] = None
+    packaging_relations: Optional[List[ComboProductPackagingRelationCreate]] = None
 
 
 class ComboProduct(ComboProductBase):
@@ -57,9 +61,8 @@ class ComboProduct(ComboProductBase):
     
     # 关联信息
     warehouse_name: Optional[str] = None
-    packaging_name: Optional[str] = None
-    packaging_sku: Optional[str] = None
     combo_items: List[ComboProductItem] = []
+    packaging_relations: List[ComboProductPackagingRelation] = []
 
     class Config:
         from_attributes = True

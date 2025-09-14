@@ -32,6 +32,8 @@ import {
 import { useToast } from '@/hooks/use-toast'
 import { Plus, Pencil, Trash2, Package, Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import { api } from '@/lib/api'
+import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector'
+import { PackagingRelation, ProductPackagingRelation } from '@/types'
 
 interface Product {
   id: number
@@ -40,17 +42,12 @@ interface Product {
   sale_type: string
   image_url?: string
   warehouse_id: number
-  packaging_id?: number
   created_at: string
   warehouse?: {
     id: number
     name: string
   }
-  packaging?: {
-    id: number
-    name: string
-    sku: string
-  }
+  packaging_relations?: ProductPackagingRelation[]
 }
 
 interface ProductListResponse {
@@ -72,7 +69,7 @@ interface ProductForm {
   sale_type: string
   image_url?: string
   warehouse_id: number | null
-  packaging_id?: number | null
+  packaging_relations: PackagingRelation[]
 }
 
 const SALE_TYPES = [
@@ -93,7 +90,7 @@ export default function ProductsPage() {
     sale_type: '',
     image_url: '',
     warehouse_id: null,
-    packaging_id: null
+    packaging_relations: []
   })
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isUploading, setIsUploading] = useState(false)
@@ -185,7 +182,10 @@ export default function ProductsPage() {
         sale_type: product.sale_type,
         image_url: product.image_url || '',
         warehouse_id: product.warehouse_id,
-        packaging_id: product.packaging_id || null
+        packaging_relations: product.packaging_relations?.map(pr => ({
+          packaging_id: pr.packaging_id,
+          quantity: pr.quantity
+        })) || []
       })
     } else {
       setEditingProduct(null)
@@ -195,7 +195,7 @@ export default function ProductsPage() {
         sale_type: '',
         image_url: '',
         warehouse_id: null,
-        packaging_id: null
+        packaging_relations: []
       })
     }
     setIsDialogOpen(true)
@@ -211,7 +211,7 @@ export default function ProductsPage() {
       sale_type: '',
       image_url: '',
       warehouse_id: null,
-      packaging_id: null
+      packaging_relations: []
     })
   }
 
@@ -267,7 +267,8 @@ export default function ProductsPage() {
       const submitData = {
         ...formData,
         image_url: imageUrl,
-        packaging_id: formData.sale_type === '包材' ? null : formData.packaging_id
+        // 只有商品类型才发送包材关系
+        packaging_relations: formData.sale_type === '商品' ? formData.packaging_relations : []
       }
 
       if (editingProduct) {
@@ -391,7 +392,7 @@ export default function ProductsPage() {
               添加商品
             </Button>
           </DialogTrigger>
-          <DialogContent className="sm:max-w-[425px]">
+          <DialogContent className="sm:max-w-[425px] max-h-[90vh]" style={{overflowY: 'auto'}}>
             <DialogHeader>
               <DialogTitle>
                 {editingProduct ? '编辑商品' : '添加商品'}
@@ -463,29 +464,12 @@ export default function ProductsPage() {
               
               {formData.sale_type === '商品' && (
                 <div>
-                  <Label htmlFor="packaging_id">选择包材（可选）</Label>
-                  <Select
-                    value={formData.packaging_id?.toString() || ''}
-                    onValueChange={(value) => {
-                      if (value === 'none') {
-                        setFormData(prev => ({ ...prev, packaging_id: null }))
-                      } else {
-                        setFormData(prev => ({ ...prev, packaging_id: parseInt(value) }))
-                      }
-                    }}
-                  >
-                    <SelectTrigger>
-                      <SelectValue placeholder="请选择包材（可选）" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value="none">无需包材</SelectItem>
-                      {packagingProducts.map((packaging) => (
-                        <SelectItem key={packaging.id} value={packaging.id.toString()}>
-                          {packaging.name} ({packaging.sku})
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <MultiPackagingSelector
+                    label="包材配置（可选）"
+                    availablePackaging={packagingProducts}
+                    selectedPackaging={formData.packaging_relations}
+                    onChange={(packaging) => setFormData(prev => ({ ...prev, packaging_relations: packaging }))}
+                  />
                 </div>
               )}
               
@@ -638,10 +622,21 @@ export default function ProductsPage() {
                     </TableCell>
                     <TableCell>{product.warehouse?.name}</TableCell>
                     <TableCell>
-                      {product.packaging 
-                        ? `${product.packaging.name} (${product.packaging.sku})` 
-                        : '-'
-                      }
+                      {product.packaging_relations && product.packaging_relations.length > 0 ? (
+                        <div className="space-y-1">
+                          {product.packaging_relations.map((pr, index) => (
+                            <div key={index} className="text-sm">
+                              {pr.packaging_name && pr.packaging_sku ? (
+                                `${pr.packaging_name} (${pr.packaging_sku}) ×${pr.quantity}`
+                              ) : (
+                                `包材ID: ${pr.packaging_id} ×${pr.quantity}`
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      ) : (
+                        '-'
+                      )}
                     </TableCell>
                     <TableCell>
                       {new Date(product.created_at).toLocaleDateString('zh-CN')}

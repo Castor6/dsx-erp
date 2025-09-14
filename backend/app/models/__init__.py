@@ -6,6 +6,7 @@ from .purchase_order import PurchaseOrder, PurchaseOrderItem
 from .inventory import InventoryRecord, InventoryTransaction
 from .supplier_product import SupplierProduct
 from .combo_product import ComboProduct, ComboProductItem, ComboInventoryRecord, ComboInventoryTransaction
+from .packaging_relation import ProductPackagingRelation, ComboProductPackagingRelation, ComboItemPackagingRelation
 
 __all__ = [
     "User",
@@ -21,4 +22,7 @@ __all__ = [
     "ComboProductItem",
     "ComboInventoryRecord",
     "ComboInventoryTransaction",
+    "ProductPackagingRelation",
+    "ComboProductPackagingRelation",
+    "ComboItemPackagingRelation",
 ]

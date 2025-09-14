@@ -1,6 +1,6 @@
 "use client"
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useCallback } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import {
@@ -33,6 +33,8 @@ import { useToast } from '@/hooks/use-toast'
 import { Plus, Pencil, Trash2, Package, Minus, Search, ChevronLeft, ChevronRight } from 'lucide-react'
 import { api } from '@/lib/api'
 import SearchableSelect from '@/components/ui/searchable-select'
+import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector'
+import { PackagingRelation, ComboItemPackagingRelation, ProductPackagingRelation, ComboProductPackagingRelation } from '@/types'
 
 interface ComboProduct {
   id: number
@@ -40,12 +42,10 @@ interface ComboProduct {
   sku: string
   warehouse_id: number
   warehouse_name?: string
-  packaging_id: number
-  packaging_name?: string
-  packaging_sku?: string
   created_at: string
   updated_at?: string
   combo_items: ComboProductItem[]
+  packaging_relations?: ComboProductPackagingRelation[]
 }
 
 interface ComboProductItem {
@@ -56,6 +56,7 @@ interface ComboProductItem {
   created_at: string
   base_product_name?: string
   base_product_sku?: string
+  packaging_relations?: ComboItemPackagingRelation[]
 }
 
 interface Product {
@@ -74,13 +75,14 @@ interface ComboProductForm {
   name: string
   sku: string
   warehouse_id: number | null
-  packaging_id: number | null
   combo_items: ComboProductItemForm[]
+  packaging_relations: PackagingRelation[]
 }
 
 interface ComboProductItemForm {
   base_product_id: number | null
   quantity: number
+  packaging_relations: PackagingRelation[]
 }
 
 interface ComboProductListResponse {
@@ -103,8 +105,8 @@ export default function ComboProductsPage() {
     name: '',
     sku: '',
     warehouse_id: null,
-    packaging_id: null,
-    combo_items: [{ base_product_id: null, quantity: 1 }]
+    combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
+    packaging_relations: []
   })
   
   // 分页和搜索状态
@@ -159,7 +161,7 @@ export default function ComboProductsPage() {
   }
 
   // 可搜索的基础商品获取函数
-  const fetchSearchableBaseProducts = async (search: string) => {
+  const fetchSearchableBaseProducts = useCallback(async (search: string) => {
     try {
       const params = new URLSearchParams({
         sale_type: '商品',
@@ -172,13 +174,34 @@ export default function ComboProductsPage() {
       
       const response = await api.get(`/api/v1/products/?${params.toString()}`)
       const data = response.data
-      const items = data.items || data
-      return Array.isArray(items) ? items : []
+      const apiItems = Array.isArray(data.items) ? data.items : (Array.isArray(data) ? data : [])
+      
+      // 合并API结果和当前状态中的基础商品，确保已选中的商品能被找到
+      const allProducts = [...baseProducts]
+      
+      // 添加API返回的商品，避免重复
+      apiItems.forEach(apiProduct => {
+        if (!allProducts.some(existing => existing.id === apiProduct.id)) {
+          allProducts.push(apiProduct)
+        }
+      })
+      
+      // 如果有搜索词，过滤结果
+      if (search.trim()) {
+        const searchLower = search.toLowerCase()
+        return allProducts.filter(product => 
+          product.name.toLowerCase().includes(searchLower) || 
+          product.sku.toLowerCase().includes(searchLower)
+        )
+      }
+      
+      return allProducts
     } catch (error) {
       console.error('获取基础商品失败:', error)
-      return []
+      // 即使API失败，也返回当前状态中的基础商品
+      return baseProducts
     }
-  }
+  }, [baseProducts])
 
   const fetchPackagingProducts = async () => {
     try {
@@ -193,6 +216,21 @@ export default function ComboProductsPage() {
         description: "获取包材列表失败",
         variant: "destructive",
       })
+    }
+  }
+
+  // 获取商品的默认包材配置
+  const fetchProductDefaultPackaging = async (productId: number): Promise<PackagingRelation[]> => {
+    try {
+      const response = await api.get(`/api/v1/products/${productId}/packaging-relations`)
+      const data: ProductPackagingRelation[] = response.data
+      return data.map(pr => ({
+        packaging_id: pr.packaging_id,
+        quantity: pr.quantity
+      }))
+    } catch (error) {
+      console.error('获取商品默认包材配置失败:', error)
+      return []
     }
   }
 
@@ -212,15 +250,46 @@ export default function ComboProductsPage() {
   const handleOpenDialog = (product?: ComboProduct) => {
     if (product) {
       setEditingProduct(product)
-      setFormData({
-        name: product.name,
-        sku: product.sku,
-        warehouse_id: product.warehouse_id,
-        packaging_id: product.packaging_id,
-        combo_items: product.combo_items.map(item => ({
-          base_product_id: item.base_product_id,
-          quantity: item.quantity
+      
+      // 预先添加已选择的基础商品到可搜索列表中
+      const selectedBaseProducts: Product[] = product.combo_items
+        .filter(item => item.base_product_name && item.base_product_sku)
+        .map(item => ({
+          id: item.base_product_id,
+          name: item.base_product_name!,
+          sku: item.base_product_sku!,
+          sale_type: '商品'
         }))
+      
+      // 先同步更新基础商品列表
+      setBaseProducts(prev => {
+        const newProducts = selectedBaseProducts.filter(
+          newProduct => !prev.some(existing => existing.id === newProduct.id)
+        )
+        const updatedProducts = [...prev, ...newProducts]
+        
+        // 立即设置表单数据，此时使用更新后的商品列表
+        setTimeout(() => {
+          setFormData({
+            name: product.name,
+            sku: product.sku,
+            warehouse_id: product.warehouse_id,
+            combo_items: product.combo_items.map(item => ({
+              base_product_id: item.base_product_id,
+              quantity: item.quantity,
+              packaging_relations: item.packaging_relations?.map(pr => ({
+                packaging_id: pr.packaging_id,
+                quantity: pr.quantity
+              })) || []
+            })),
+            packaging_relations: product.packaging_relations?.map(pr => ({
+              packaging_id: pr.packaging_id,
+              quantity: pr.quantity
+            })) || []
+          })
+        }, 0)
+        
+        return updatedProducts
       })
     } else {
       setEditingProduct(null)
@@ -228,8 +297,8 @@ export default function ComboProductsPage() {
         name: '',
         sku: '',
         warehouse_id: null,
-        packaging_id: null,
-        combo_items: [{ base_product_id: null, quantity: 1 }]
+        combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
+        packaging_relations: []
       })
     }
     setIsDialogOpen(true)
@@ -243,13 +312,35 @@ export default function ComboProductsPage() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!formData.name || !formData.sku || !formData.warehouse_id || !formData.packaging_id) {
+    if (!formData.name || !formData.sku || !formData.warehouse_id) {
       toast({
         title: "错误",
         description: "请填写所有必填字段",
         variant: "destructive",
       })
       return
+    }
+
+    // 验证组合商品包材配置
+    if (!formData.packaging_relations || formData.packaging_relations.length === 0) {
+      toast({
+        title: "错误",
+        description: "请配置组合商品的包材",
+        variant: "destructive",
+      })
+      return
+    }
+
+    // 验证组合商品包材配置的完整性
+    for (const packaging of formData.packaging_relations) {
+      if (!packaging.packaging_id || packaging.quantity <= 0) {
+        toast({
+          title: "错误",
+          description: "组合商品的包材配置不完整，请检查包材选择和数量",
+          variant: "destructive",
+        })
+        return
+      }
     }
 
     // 验证组合明细
@@ -271,17 +362,46 @@ export default function ComboProductsPage() {
         })
         return
       }
+
+      // 验证基础商品的包材配置
+      if (item.packaging_relations && item.packaging_relations.length > 0) {
+        for (const packaging of item.packaging_relations) {
+          if (!packaging.packaging_id || packaging.quantity <= 0) {
+            toast({
+              title: "错误",
+              description: "基础商品的包材配置不完整，请检查包材选择和数量",
+              variant: "destructive",
+            })
+            return
+          }
+        }
+      }
     }
 
     try {
+      // 构建提交数据，移除旧的packaging_id字段
+      const submitData = {
+        name: formData.name,
+        sku: formData.sku,
+        warehouse_id: formData.warehouse_id,
+        combo_items: formData.combo_items.map(item => ({
+          base_product_id: item.base_product_id,
+          quantity: item.quantity,
+          packaging_relations: item.packaging_relations || []
+        })),
+        packaging_relations: formData.packaging_relations || []
+      }
+
+      console.log('提交数据:', JSON.stringify(submitData, null, 2)) // 调试用
+
       if (editingProduct) {
-        await api.put(`/api/v1/combo-products/${editingProduct.id}`, formData)
+        await api.put(`/api/v1/combo-products/${editingProduct.id}`, submitData)
         toast({
           title: "成功",
           description: "组合商品更新成功",
         })
       } else {
-        await api.post('/api/v1/combo-products/', formData)
+        await api.post('/api/v1/combo-products/', submitData)
         toast({
           title: "成功",
           description: "组合商品创建成功",
@@ -291,9 +411,12 @@ export default function ComboProductsPage() {
       await fetchComboProducts(currentPage, searchTerm, '')
       handleCloseDialog()
     } catch (error: any) {
+      console.error('组合商品提交错误:', error)
+      console.error('错误详情:', error.response?.data)
+      
       toast({
         title: "错误",
-        description: error.response?.data?.detail || "操作失败",
+        description: error.response?.data?.detail || error.message || "操作失败",
         variant: "destructive",
       })
     }
@@ -321,7 +444,7 @@ export default function ComboProductsPage() {
   const handleAddComboItem = () => {
     setFormData(prev => ({
       ...prev,
-      combo_items: [...prev.combo_items, { base_product_id: null, quantity: 1 }]
+      combo_items: [...prev.combo_items, { base_product_id: null, quantity: 1, packaging_relations: [] }]
     }))
   }
 
@@ -341,11 +464,36 @@ export default function ComboProductsPage() {
     }))
   }
 
-  const handleComboItemChange = (index: number, field: keyof ComboProductItemForm, value: any) => {
+  const handleComboItemChange = async (index: number, field: keyof ComboProductItemForm, value: any) => {
+    if (field === 'base_product_id' && value) {
+      // 当选择基础商品时，自动获取并预填充其默认包材配置
+      const defaultPackaging = await fetchProductDefaultPackaging(value)
+      setFormData(prev => ({
+        ...prev,
+        combo_items: prev.combo_items.map((item, i) => 
+          i === index ? { 
+            ...item, 
+            [field]: value, 
+            packaging_relations: defaultPackaging 
+          } : item
+        )
+      }))
+    } else {
+      setFormData(prev => ({
+        ...prev,
+        combo_items: prev.combo_items.map((item, i) => 
+          i === index ? { ...item, [field]: value } : item
+        )
+      }))
+    }
+  }
+
+  // 处理基础商品包材配置变化
+  const handleComboItemPackagingChange = (index: number, packaging: PackagingRelation[]) => {
     setFormData(prev => ({
       ...prev,
       combo_items: prev.combo_items.map((item, i) => 
-        i === index ? { ...item, [field]: value } : item
+        i === index ? { ...item, packaging_relations: packaging } : item
       )
     }))
   }
@@ -440,25 +588,13 @@ export default function ComboProductsPage() {
                     </Select>
                   </div>
 
-                  <div className="space-y-2">
-                    <Label htmlFor="packaging_id" className="text-sm font-medium">
-                      包材选择*
-                    </Label>
-                    <Select 
-                      value={formData.packaging_id?.toString() || ''} 
-                      onValueChange={(value) => setFormData(prev => ({ ...prev, packaging_id: parseInt(value) }))}
-                    >
-                      <SelectTrigger>
-                        <SelectValue placeholder="选择包材" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {packagingProducts.map((packaging) => (
-                          <SelectItem key={packaging.id} value={packaging.id.toString()}>
-                            {packaging.name} ({packaging.sku})
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
+                  <div className="space-y-2 col-span-4">
+                    <MultiPackagingSelector
+                      label="组合商品包材配置*"
+                      availablePackaging={packagingProducts}
+                      selectedPackaging={formData.packaging_relations}
+                      onChange={(packaging) => setFormData(prev => ({ ...prev, packaging_relations: packaging }))}
+                    />
                   </div>
                 </div>
 
@@ -479,44 +615,61 @@ export default function ComboProductsPage() {
                   
                   <div className="space-y-3 max-h-[70vh] border rounded p-3">
                     {formData.combo_items.map((item, index) => (
-                      <div key={index} className="flex items-center gap-3 p-3 border rounded-md bg-gray-50">
-                        <div className="flex-1">
-                          <SearchableSelect
-                            label="基础商品"
-                            placeholder="搜索基础商品名称或SKU..."
-                            value={item.base_product_id}
-                            onValueChange={(value) => handleComboItemChange(index, 'base_product_id', value)}
-                            fetchOptions={fetchSearchableBaseProducts}
-                            renderOption={(option) => (
-                              <div className="flex flex-col">
-                                <span className="font-medium">{option.name}</span>
-                                <span className="text-sm text-gray-500">SKU: {option.sku}</span>
-                              </div>
-                            )}
-                            required
-                          />
+                      <div key={index} className="space-y-3 p-4 border rounded-md bg-gray-50">
+                        <div className="flex items-center gap-3">
+                          <div className="flex-1">
+                            <SearchableSelect
+                              label="基础商品"
+                              placeholder="搜索基础商品名称或SKU..."
+                              value={item.base_product_id}
+                              onValueChange={(value) => handleComboItemChange(index, 'base_product_id', value)}
+                              fetchOptions={fetchSearchableBaseProducts}
+                              renderOption={(option) => (
+                                <div className="flex flex-col">
+                                  <span className="font-medium">{option.name}</span>
+                                  <span className="text-sm text-gray-500">SKU: {option.sku}</span>
+                                </div>
+                              )}
+                              required
+                            />
+                          </div>
+                          
+                          <div className="w-24">
+                            <Label className="text-xs text-gray-600">数量</Label>
+                            <Input
+                              type="number"
+                              min="1"
+                              value={item.quantity}
+                              onChange={(e) => handleComboItemChange(index, 'quantity', parseInt(e.target.value) || 1)}
+                              className="text-center"
+                            />
+                          </div>
+                          
+                          <Button
+                            type="button"
+                            onClick={() => handleRemoveComboItem(index)}
+                            size="sm"
+                            variant="outline"
+                            className="mt-4"
+                          >
+                            <Minus className="h-3 w-3" />
+                          </Button>
                         </div>
                         
-                        <div className="w-24">
-                          <Label className="text-xs text-gray-600">数量</Label>
-                          <Input
-                            type="number"
-                            min="1"
-                            value={item.quantity}
-                            onChange={(e) => handleComboItemChange(index, 'quantity', parseInt(e.target.value) || 1)}
-                            className="text-center"
-                          />
-                        </div>
-                        
-                        <Button
-                          type="button"
-                          onClick={() => handleRemoveComboItem(index)}
-                          size="sm"
-                          variant="outline"
-                          className="mt-4"
-                        >
-                          <Minus className="h-3 w-3" />
-                        </Button>
+                        {/* 基础商品包材配置 */}
+                        {item.base_product_id && (
+                          <div className="mt-3 p-3 border border-dashed rounded bg-white">
+                            <MultiPackagingSelector
+                              label={`基础商品包材配置（可自定义）`}
+                              availablePackaging={packagingProducts}
+                              selectedPackaging={item.packaging_relations}
+                              onChange={(packaging) => handleComboItemPackagingChange(index, packaging)}
+                            />
+                            <div className="text-xs text-gray-500 mt-2">
+                              💡 已自动预填充该商品的默认包材配置，您可以根据需要进行修改
+                            </div>
+                          </div>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -583,18 +736,35 @@ export default function ComboProductsPage() {
                   <TableCell className="font-mono text-sm">{product.sku}</TableCell>
                   <TableCell>{product.warehouse_name}</TableCell>
                   <TableCell>
-                    <div className="text-sm">
-                      {product.packaging_name}
-                      <div className="text-xs text-muted-foreground">
-                        {product.packaging_sku}
+                    {product.packaging_relations && product.packaging_relations.length > 0 ? (
+                      <div className="space-y-1">
+                        {product.packaging_relations.map((pr, index) => (
+                          <div key={index} className="text-sm">
+                            {pr.packaging_name} ×{pr.quantity}
+                            <div className="text-xs text-muted-foreground">
+                              {pr.packaging_sku}
+                            </div>
+                          </div>
+                        ))}
                       </div>
-                    </div>
+                    ) : (
+                      <div className="text-sm text-muted-foreground">-</div>
+                    )}
                   </TableCell>
                   <TableCell>
-                    <div className="space-y-1">
+                    <div className="space-y-2">
                       {product.combo_items.map((item) => (
-                        <div key={item.id} className="text-sm text-gray-600">
-                          {item.base_product_name} × {item.quantity}
+                        <div key={item.id} className="p-2 border rounded bg-gray-50">
+                          <div className="text-sm font-medium text-gray-800">
+                            {item.base_product_name} × {item.quantity}
+                          </div>
+                          {item.packaging_relations && item.packaging_relations.length > 0 && (
+                            <div className="text-xs text-gray-500 mt-1">
+                              包材: {item.packaging_relations.map(pr => 
+                                `${pr.packaging_name} ×${pr.quantity}`
+                              ).join(', ')}
+                            </div>
+                          )}
                         </div>
                       ))}
                     </div>

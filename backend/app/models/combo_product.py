@@ -12,16 +12,18 @@ class ComboProduct(Base):
     name = Column(String(200), nullable=False)  # 组合商品名称
     sku = Column(String(100), unique=True, index=True, nullable=False)  # 组合商品SKU
     warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=False)
-    packaging_id = Column(Integer, ForeignKey("products.id"), nullable=False)  # 组合商品包材
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
     
     # 关系
     warehouse = relationship("Warehouse")
-    packaging = relationship("Product", foreign_keys=[packaging_id])  # 组合商品包材
     combo_items = relationship("ComboProductItem", back_populates="combo_product", cascade="all, delete-orphan")
     # 库存记录
-    inventory_records = relationship("ComboInventoryRecord", back_populates="combo_product")
+    inventory_records = relationship("ComboInventoryRecord", back_populates="combo_product", cascade="all, delete-orphan")
+    # 库存变动记录
+    inventory_transactions = relationship("ComboInventoryTransaction", cascade="all, delete-orphan")
+    # 包材关系 (多对多)
+    packaging_relations = relationship("ComboProductPackagingRelation", back_populates="combo_product", cascade="all, delete-orphan")
 
 
 class ComboProductItem(Base):
@@ -37,6 +39,7 @@ class ComboProductItem(Base):
     # 关系
     combo_product = relationship("ComboProduct", back_populates="combo_items")
     base_product = relationship("Product")
+    packaging_relations = relationship("ComboItemPackagingRelation", back_populates="combo_product_item", cascade="all, delete-orphan")
 
 
 class ComboInventoryRecord(Base):
