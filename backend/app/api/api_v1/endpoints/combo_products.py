@@ -378,8 +378,11 @@ async def get_combo_product(
                 "base_product_sku": item.base_product.sku,
                 "packaging_relations": [
                     {
+                        "id": rel.id,
+                        "combo_product_item_id": rel.combo_product_item_id,
                         "packaging_id": rel.packaging_id,
                         "quantity": rel.quantity,
+                        "created_at": rel.created_at,
                         "packaging_name": rel.packaging.name if rel.packaging else None,
                         "packaging_sku": rel.packaging.sku if rel.packaging else None,
                     }

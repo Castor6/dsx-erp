@@ -131,6 +131,30 @@ interface ComboProductDetails {
   }>
 }
 
+interface PackagingInventoryItem {
+  packaging_id: number
+  packaging_name: string
+  packaging_sku: string
+  required_quantity: number
+  warehouse_id: number
+  warehouse_name: string
+  semi_finished: number
+  total_stock: number
+  available_stock: number
+  status: string
+}
+
+interface ComboPackagingDetails {
+  combo_product_packaging: PackagingInventoryItem[]
+  base_products_packaging: Array<{
+    base_product_id: number
+    base_product_name: string
+    base_product_sku: string
+    required_quantity: number
+    packaging_list: PackagingInventoryItem[]
+  }>
+}
+
 export default function InventoryPage() {
   // 状态管理
   const [inventorySummary, setInventorySummary] = useState<InventorySummary[]>([])
@@ -170,6 +194,10 @@ export default function InventoryPage() {
   })
   const [isComboDetailsDialogOpen, setIsComboDetailsDialogOpen] = useState(false)
   const [selectedComboDetails, setSelectedComboDetails] = useState<ComboProductDetails | null>(null)
+  const [isPackagingDialogOpen, setIsPackagingDialogOpen] = useState(false)
+  const [packagingInventory, setPackagingInventory] = useState<PackagingInventoryItem[]>([])
+  const [packagingProductInfo, setPackagingProductInfo] = useState<{name: string, sku: string} | null>(null)
+  const [comboPackagingDetails, setComboPackagingDetails] = useState<ComboPackagingDetails | null>(null)
   
   const { toast } = useToast()
 
@@ -263,6 +291,10 @@ export default function InventoryPage() {
         combo_items: comboProduct.combo_items
       }
       
+      // 获取组合商品的包材库存信息
+      const packagingResponse = await api.get(`/api/v1/inventory/combo-product/${comboProductId}/packaging?warehouse_id=${comboProduct.warehouse_id}`)
+      setComboPackagingDetails(packagingResponse.data)
+      
       setSelectedComboDetails(details)
       setIsComboDetailsDialogOpen(true)
     } catch (error) {
@@ -270,6 +302,24 @@ export default function InventoryPage() {
       toast({
         title: "错误",
         description: "获取组合商品明细失败",
+        variant: "destructive",
+      })
+    }
+  }
+
+  const fetchProductPackaging = async (productId: number, productName: string, productSku: string, warehouseId?: number) => {
+    try {
+      const params = warehouseId ? `?warehouse_id=${warehouseId}` : ''
+      const response = await api.get(`/api/v1/inventory/product/${productId}/packaging${params}`)
+      
+      setPackagingInventory(response.data)
+      setPackagingProductInfo({ name: productName, sku: productSku })
+      setIsPackagingDialogOpen(true)
+    } catch (error) {
+      console.error('获取包材库存失败:', error)
+      toast({
+        title: "错误",
+        description: "获取包材库存失败",
         variant: "destructive",
       })
     }
@@ -295,7 +345,7 @@ export default function InventoryPage() {
     } else {
       fetchComboInventory(1)
     }
-  }, [selectedWarehouse, activeTab])
+  }, [selectedWarehouse])
 
   // 监听商品类型变化 - 基础商品
   useEffect(() => {
@@ -304,12 +354,25 @@ export default function InventoryPage() {
     }
   }, [baseSaleType])
 
-  // 切换标签页时加载数据
+  // 切换标签页时加载数据 - 优化版本，避免闪烁
   useEffect(() => {
+    // 避免在初始化时触发切换状态
+    if (activeTab === 'base' && baseInventory.items.length === 0) {
+      // 基础商品数据已在初始化时加载，这里不需要重新加载
+      return
+    }
+    
     if (activeTab === 'combo' && comboInventory.items.length === 0) {
       fetchComboInventory(1)
     }
   }, [activeTab])
+
+  // 优化的标签页切换处理函数 - 简化版本
+  const handleTabSwitch = (newTab: 'base' | 'combo') => {
+    if (newTab === activeTab) return
+    
+    setActiveTab(newTab)
+  }
 
   // 事件处理函数
   const handleAction = async (e: React.FormEvent) => {
@@ -590,7 +653,22 @@ export default function InventoryPage() {
                   </div>
                 </TableCell>
                 <TableCell>
-                  <div className="flex items-center gap-1">
+                  <div className="flex items-center gap-1 flex-wrap">
+                    {record.product?.sale_type === '商品' && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => fetchProductPackaging(
+                          record.product_id, 
+                          record.product?.name || '未知商品', 
+                          record.product?.sku || '',
+                          record.warehouse_id
+                        )}
+                        className="text-blue-600 hover:text-blue-800 p-1 h-auto"
+                      >
+                        查看包材
+                      </Button>
+                    )}
                     {record.product?.sale_type === '商品' && record.semi_finished > 0 && (
                       <Button
                         size="sm"
@@ -869,8 +947,8 @@ export default function InventoryPage() {
       <div className="border-b border-gray-200">
         <nav className="-mb-px flex space-x-8">
           <button
-            onClick={() => setActiveTab('base')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+            onClick={() => handleTabSwitch('base')}
+            className={`py-2 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
               activeTab === 'base'
                 ? 'border-blue-500 text-blue-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -880,8 +958,8 @@ export default function InventoryPage() {
             基础商品库存
           </button>
           <button
-            onClick={() => setActiveTab('combo')}
-            className={`py-2 px-1 border-b-2 font-medium text-sm ${
+            onClick={() => handleTabSwitch('combo')}
+            className={`py-2 px-1 border-b-2 font-medium text-sm transition-all duration-200 ${
               activeTab === 'combo'
                 ? 'border-purple-500 text-purple-600'
                 : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
@@ -982,10 +1060,14 @@ export default function InventoryPage() {
               <Loader2 className="h-6 w-6 animate-spin" />
               <span className="ml-2">加载中...</span>
             </div>
-          ) : activeTab === 'base' ? (
-            renderBaseInventoryTable()
           ) : (
-            renderComboInventoryTable()
+            <div className="transition-opacity duration-200">
+              {activeTab === 'base' ? (
+                renderBaseInventoryTable()
+              ) : (
+                renderComboInventoryTable()
+              )}
+            </div>
           )}
         </CardContent>
       </Card>
@@ -1041,18 +1123,124 @@ export default function InventoryPage() {
         </DialogContent>
       </Dialog>
 
+      {/* 包材库存查看对话框 */}
+      <Dialog open={isPackagingDialogOpen} onOpenChange={setIsPackagingDialogOpen}>
+        <DialogContent className="max-w-4xl">
+          <DialogHeader>
+            <DialogTitle>包材库存详情</DialogTitle>
+            <DialogDescription>
+              查看商品所需包材的库存情况
+            </DialogDescription>
+          </DialogHeader>
+          
+          {packagingProductInfo && (
+            <div className="space-y-4">
+              {/* 商品基本信息 */}
+              <div className="border rounded-lg p-4 bg-gray-50">
+                <h3 className="font-semibold text-lg mb-2">商品信息</h3>
+                <div className="grid grid-cols-2 gap-4">
+                  <div>
+                    <span className="text-sm text-gray-600">商品名称：</span>
+                    <span className="font-medium">{packagingProductInfo.name}</span>
+                  </div>
+                  <div>
+                    <span className="text-sm text-gray-600">商品SKU：</span>
+                    <span className="font-medium">{packagingProductInfo.sku}</span>
+                  </div>
+                </div>
+              </div>
+              
+              {/* 包材库存列表 */}
+              <div>
+                <h3 className="font-semibold text-lg mb-3">所需包材库存</h3>
+                {packagingInventory.length > 0 ? (
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>包材名称</TableHead>
+                        <TableHead>包材SKU</TableHead>
+                        <TableHead>仓库</TableHead>
+                        <TableHead className="text-right">所需数量</TableHead>
+                        <TableHead className="text-right">可用库存</TableHead>
+                        <TableHead className="text-right">总库存</TableHead>
+                        <TableHead>库存状态</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {packagingInventory.map((item, index) => (
+                        <TableRow key={`${item.packaging_id}-${item.warehouse_id}`}>
+                          <TableCell>
+                            <div className="font-medium">{item.packaging_name}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm text-gray-500">{item.packaging_sku}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm">{item.warehouse_name}</div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className="font-medium">{item.required_quantity}</span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className={`font-medium ${
+                              item.available_stock === 0 ? 'text-red-600' :
+                              item.available_stock < item.required_quantity ? 'text-orange-600' : 'text-green-600'
+                            }`}>
+                              {item.available_stock}
+                            </span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className="text-gray-600">{item.total_stock}</span>
+                          </TableCell>
+                          <TableCell>
+                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                              item.status === '库存充足' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}>
+                              {item.status}
+                            </span>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                ) : (
+                  <div className="text-center py-8 text-gray-500">
+                    <Package className="h-12 w-12 mx-auto mb-4 text-gray-300" />
+                    <p>该商品无需包材或未配置包材关系</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+          
+          <DialogFooter>
+            <Button 
+              type="button" 
+              variant="outline" 
+              onClick={() => {
+                setIsPackagingDialogOpen(false)
+                setPackagingInventory([])
+                setPackagingProductInfo(null)
+              }}
+            >
+              关闭
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
       {/* 组合商品明细对话框 */}
       <Dialog open={isComboDetailsDialogOpen} onOpenChange={setIsComboDetailsDialogOpen}>
-        <DialogContent className="max-w-4xl">
+        <DialogContent className="max-w-6xl max-h-[90vh] overflow-y-auto">
           <DialogHeader>
             <DialogTitle>组合商品明细</DialogTitle>
             <DialogDescription>
-              查看组合商品包含的基础商品详情
+              查看组合商品包含的基础商品详情和包材库存
             </DialogDescription>
           </DialogHeader>
           
           {selectedComboDetails && (
-            <div className="space-y-4">
+            <div className="space-y-6">
               {/* 组合商品基本信息 */}
               <div className="border rounded-lg p-4 bg-gray-50">
                 <h3 className="font-semibold text-lg mb-2">组合商品信息</h3>
@@ -1071,10 +1259,62 @@ export default function InventoryPage() {
                   </div>
                 </div>
               </div>
+
+              {/* 组合商品本身的包材 */}
+              {comboPackagingDetails && comboPackagingDetails.combo_product_packaging.length > 0 && (
+                <div>
+                  <h3 className="font-semibold text-lg mb-3 text-purple-700">组合商品所需包材</h3>
+                  <Table>
+                    <TableHeader>
+                      <TableRow>
+                        <TableHead>包材名称</TableHead>
+                        <TableHead>包材SKU</TableHead>
+                        <TableHead>仓库</TableHead>
+                        <TableHead className="text-right">所需数量</TableHead>
+                        <TableHead className="text-right">可用库存</TableHead>
+                        <TableHead>库存状态</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {comboPackagingDetails.combo_product_packaging.map((item, index) => (
+                        <TableRow key={`combo-${item.packaging_id}-${item.warehouse_id}`}>
+                          <TableCell>
+                            <div className="font-medium">{item.packaging_name}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm text-gray-500">{item.packaging_sku}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm">{item.warehouse_name}</div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className="font-medium">{item.required_quantity}</span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className={`font-medium ${
+                              item.available_stock === 0 ? 'text-red-600' :
+                              item.available_stock < item.required_quantity ? 'text-orange-600' : 'text-green-600'
+                            }`}>
+                              {item.available_stock}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                              item.status === '库存充足' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}>
+                              {item.status}
+                            </span>
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              )}
               
               {/* 基础商品列表 */}
               <div>
-                <h3 className="font-semibold text-lg mb-3">包含的基础商品</h3>
+                <h3 className="font-semibold text-lg mb-3 text-blue-700">包含的基础商品</h3>
                 <Table>
                   <TableHeader>
                     <TableRow>
@@ -1129,6 +1369,71 @@ export default function InventoryPage() {
                   </TableBody>
                 </Table>
               </div>
+
+              {/* 基础商品的包材需求 */}
+              {comboPackagingDetails && comboPackagingDetails.base_products_packaging.some(bp => bp.packaging_list.length > 0) && (
+                <div>
+                  <h3 className="font-semibold text-lg mb-3 text-green-700">基础商品所需包材</h3>
+                  <div className="space-y-4">
+                    {comboPackagingDetails.base_products_packaging.map((baseProduct) => {
+                      if (baseProduct.packaging_list.length === 0) return null
+                      
+                      return (
+                        <div key={baseProduct.base_product_id} className="border rounded-lg p-4">
+                          <h4 className="font-medium mb-3 text-gray-800">
+                            {baseProduct.base_product_name} ({baseProduct.base_product_sku}) - 需要 {baseProduct.required_quantity} 个
+                          </h4>
+                          <Table>
+                            <TableHeader>
+                              <TableRow>
+                                <TableHead>包材名称</TableHead>
+                                <TableHead>包材SKU</TableHead>
+                                <TableHead>仓库</TableHead>
+                                <TableHead className="text-right">单品所需</TableHead>
+                                <TableHead className="text-right">可用库存</TableHead>
+                                <TableHead>库存状态</TableHead>
+                              </TableRow>
+                            </TableHeader>
+                            <TableBody>
+                              {baseProduct.packaging_list.map((packaging, index) => (
+                                <TableRow key={`${baseProduct.base_product_id}-${packaging.packaging_id}-${packaging.warehouse_id}`}>
+                                  <TableCell>
+                                    <div className="font-medium">{packaging.packaging_name}</div>
+                                  </TableCell>
+                                  <TableCell>
+                                    <div className="text-sm text-gray-500">{packaging.packaging_sku}</div>
+                                  </TableCell>
+                                  <TableCell>
+                                    <div className="text-sm">{packaging.warehouse_name}</div>
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    <span className="font-medium">{packaging.required_quantity}</span>
+                                  </TableCell>
+                                  <TableCell className="text-right">
+                                    <span className={`font-medium ${
+                                      packaging.available_stock === 0 ? 'text-red-600' :
+                                      packaging.available_stock < packaging.required_quantity ? 'text-orange-600' : 'text-green-600'
+                                    }`}>
+                                      {packaging.available_stock}
+                                    </span>
+                                  </TableCell>
+                                  <TableCell>
+                                    <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                                      packaging.status === '库存充足' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                                    }`}>
+                                      {packaging.status}
+                                    </span>
+                                  </TableCell>
+                                </TableRow>
+                              ))}
+                            </TableBody>
+                          </Table>
+                        </div>
+                      )
+                    })}
+                  </div>
+                </div>
+              )}
             </div>
           )}
           
@@ -1139,6 +1444,7 @@ export default function InventoryPage() {
               onClick={() => {
                 setIsComboDetailsDialogOpen(false)
                 setSelectedComboDetails(null)
+                setComboPackagingDetails(null)
               }}
             >
               关闭

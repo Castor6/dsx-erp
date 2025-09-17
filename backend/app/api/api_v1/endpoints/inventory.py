@@ -622,6 +622,227 @@ async def get_combo_inventory_summary(
     return result_list
 
 
+@router.get("/product/{product_id}/packaging", response_model=List[dict])
+async def get_product_packaging_inventory(
+    product_id: int,
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取商品的包材库存信息"""
+    # 获取商品信息
+    product_result = await db.execute(
+        select(Product).where(Product.id == product_id)
+    )
+    product = product_result.scalar_one_or_none()
+    
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="商品不存在"
+        )
+    
+    packaging_info = []
+    
+    # 查询商品的包材关系（多包材）
+    packaging_relations_result = await db.execute(
+        select(ProductPackagingRelation)
+        .options(selectinload(ProductPackagingRelation.packaging))
+        .where(ProductPackagingRelation.product_id == product_id)
+    )
+    packaging_relations = packaging_relations_result.scalars().all()
+    
+    # 获取仓库名称映射（避免懒加载）
+    if not warehouse_id:
+        warehouse_result = await db.execute(select(Warehouse))
+        warehouses_map = {w.id: w.name for w in warehouse_result.scalars().all()}
+    else:
+        # 如果指定了仓库，只获取该仓库信息
+        specific_warehouse_result = await db.execute(
+            select(Warehouse).where(Warehouse.id == warehouse_id)
+        )
+        specific_warehouse = specific_warehouse_result.scalar_one_or_none()
+        warehouses_map = {warehouse_id: specific_warehouse.name if specific_warehouse else "未知仓库"}
+    
+    for relation in packaging_relations:
+        # 查询包材库存并预加载仓库信息
+        if warehouse_id:
+            inventory_result = await db.execute(
+                select(InventoryRecord)
+                .options(selectinload(InventoryRecord.warehouse))
+                .where(
+                    and_(
+                        InventoryRecord.product_id == relation.packaging_id,
+                        InventoryRecord.warehouse_id == warehouse_id
+                    )
+                )
+            )
+            inventory_records = [inventory_result.scalar_one_or_none()]
+        else:
+            # 查询所有仓库的包材库存
+            inventory_result = await db.execute(
+                select(InventoryRecord)
+                .options(selectinload(InventoryRecord.warehouse))
+                .where(InventoryRecord.product_id == relation.packaging_id)
+            )
+            inventory_records = inventory_result.scalars().all()
+        
+        for inventory in inventory_records:
+            if inventory:
+                packaging_info.append({
+                    "packaging_id": relation.packaging_id,
+                    "packaging_name": relation.packaging.name,
+                    "packaging_sku": relation.packaging.sku,
+                    "required_quantity": relation.quantity,
+                    "warehouse_id": inventory.warehouse_id,
+                    "warehouse_name": warehouses_map.get(inventory.warehouse_id, "未知仓库"),
+                    "semi_finished": inventory.semi_finished,
+                    "total_stock": inventory.semi_finished + inventory.finished,
+                    "available_stock": inventory.semi_finished,  # 包材主要看半成品库存
+                    "status": "库存充足" if inventory.semi_finished >= relation.quantity else "库存不足"
+                })
+    
+    return packaging_info
+
+
+@router.get("/combo-product/{combo_product_id}/packaging", response_model=dict)
+async def get_combo_product_packaging_inventory(
+    combo_product_id: int,
+    warehouse_id: Optional[int] = Query(None, description="仓库ID"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取组合商品的包材库存信息（包括组合商品本身的包材和基础商品的包材）"""
+    # 获取组合商品信息
+    combo_result = await db.execute(
+        select(ComboProduct)
+        .options(
+            selectinload(ComboProduct.combo_items)
+                .selectinload(ComboProductItem.base_product),
+            selectinload(ComboProduct.combo_items)
+                .selectinload(ComboProductItem.packaging_relations)
+                .selectinload(ComboItemPackagingRelation.packaging),
+            selectinload(ComboProduct.packaging_relations)
+                .selectinload(ComboProductPackagingRelation.packaging)
+        )
+        .where(ComboProduct.id == combo_product_id)
+    )
+    combo_product = combo_result.scalar_one_or_none()
+    
+    if not combo_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="组合商品不存在"
+        )
+    
+    result = {
+        "combo_product_packaging": [],
+        "base_products_packaging": []
+    }
+    
+    # 获取仓库名称映射（避免懒加载）
+    if not warehouse_id:
+        warehouse_result = await db.execute(select(Warehouse))
+        warehouses_map = {w.id: w.name for w in warehouse_result.scalars().all()}
+    else:
+        # 如果指定了仓库，只获取该仓库信息
+        specific_warehouse_result = await db.execute(
+            select(Warehouse).where(Warehouse.id == warehouse_id)
+        )
+        specific_warehouse = specific_warehouse_result.scalar_one_or_none()
+        warehouses_map = {warehouse_id: specific_warehouse.name if specific_warehouse else "未知仓库"}
+    
+    # 1. 组合商品本身的包材
+    if combo_product.packaging_relations:
+        for relation in combo_product.packaging_relations:
+            if warehouse_id:
+                inventory_result = await db.execute(
+                    select(InventoryRecord)
+                    .options(selectinload(InventoryRecord.warehouse))
+                    .where(
+                        and_(
+                            InventoryRecord.product_id == relation.packaging_id,
+                            InventoryRecord.warehouse_id == warehouse_id
+                        )
+                    )
+                )
+                inventory_records = [inventory_result.scalar_one_or_none()]
+            else:
+                inventory_result = await db.execute(
+                    select(InventoryRecord)
+                    .options(selectinload(InventoryRecord.warehouse))
+                    .where(InventoryRecord.product_id == relation.packaging_id)
+                )
+                inventory_records = inventory_result.scalars().all()
+            
+            for inventory in inventory_records:
+                if inventory:
+                    result["combo_product_packaging"].append({
+                        "packaging_id": relation.packaging_id,
+                        "packaging_name": relation.packaging.name,
+                        "packaging_sku": relation.packaging.sku,
+                        "required_quantity": relation.quantity,
+                        "warehouse_id": inventory.warehouse_id,
+                        "warehouse_name": warehouses_map.get(inventory.warehouse_id, "未知仓库"),
+                        "semi_finished": inventory.semi_finished,
+                        "total_stock": inventory.semi_finished + inventory.finished,
+                        "available_stock": inventory.semi_finished,
+                        "status": "库存充足" if inventory.semi_finished >= relation.quantity else "库存不足"
+                    })
+    
+    # 2. 基础商品的包材
+    for item in combo_product.combo_items:
+        item_packaging = {
+            "base_product_id": item.base_product_id,
+            "base_product_name": item.base_product.name,
+            "base_product_sku": item.base_product.sku,
+            "required_quantity": item.quantity,
+            "packaging_list": []
+        }
+        
+        # 检查基础商品的包材关系
+        if hasattr(item, 'packaging_relations') and item.packaging_relations:
+            for packaging_relation in item.packaging_relations:
+                if warehouse_id:
+                    inventory_result = await db.execute(
+                        select(InventoryRecord)
+                        .options(selectinload(InventoryRecord.warehouse))
+                        .where(
+                            and_(
+                                InventoryRecord.product_id == packaging_relation.packaging_id,
+                                InventoryRecord.warehouse_id == warehouse_id
+                            )
+                        )
+                    )
+                    inventory_records = [inventory_result.scalar_one_or_none()]
+                else:
+                    inventory_result = await db.execute(
+                        select(InventoryRecord)
+                        .options(selectinload(InventoryRecord.warehouse))
+                        .where(InventoryRecord.product_id == packaging_relation.packaging_id)
+                    )
+                    inventory_records = inventory_result.scalars().all()
+                
+                for inventory in inventory_records:
+                    if inventory:
+                        item_packaging["packaging_list"].append({
+                            "packaging_id": packaging_relation.packaging_id,
+                            "packaging_name": packaging_relation.packaging.name,
+                            "packaging_sku": packaging_relation.packaging.sku,
+                            "required_quantity": packaging_relation.quantity,
+                            "warehouse_id": inventory.warehouse_id,
+                            "warehouse_name": warehouses_map.get(inventory.warehouse_id, "未知仓库"),
+                            "semi_finished": inventory.semi_finished,
+                            "total_stock": inventory.semi_finished + inventory.finished,
+                            "available_stock": inventory.semi_finished,
+                            "status": "库存充足" if inventory.semi_finished >= packaging_relation.quantity else "库存不足"
+                        })
+        
+        result["base_products_packaging"].append(item_packaging)
+    
+    return result
+
+
 async def _calculate_available_to_assemble(combo_product: ComboProduct, warehouse_id: int, db: AsyncSession) -> int:
     """计算可组合数量（基于基础商品半成品库存 + 基础商品包材 + 组合商品包材半成品库存计算）"""
     if not combo_product.combo_items:
