@@ -783,6 +783,73 @@ async def get_combo_inventory_summary(
     return result_list
 
 
+@router.get("/{combo_product_id}/max-assemble-quantity")
+async def get_max_assemble_quantity(
+    combo_product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取组合商品最大可组装数量"""
+    # 获取组合商品信息
+    combo_result = await db.execute(
+        select(ComboProduct)
+        .options(
+            selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
+            selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
+            selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+        )
+        .where(ComboProduct.id == combo_product_id)
+    )
+    combo_product = combo_result.scalar_one_or_none()
+
+    if not combo_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="组合商品不存在"
+        )
+
+    # 计算可组合数量并获取限制因素
+    max_quantity, limiting_factor = await calculate_available_to_assemble_with_details(
+        combo_product, warehouse_id, db
+    )
+
+    return {
+        "max_quantity": max_quantity,
+        "limiting_factor": limiting_factor
+    }
+
+
+@router.get("/{combo_product_id}/max-ship-quantity")
+async def get_max_ship_quantity(
+    combo_product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取组合商品最大可出库数量"""
+    # 获取组合商品库存
+    combo_inventory_result = await db.execute(
+        select(ComboInventoryRecord)
+        .where(
+            and_(
+                ComboInventoryRecord.combo_product_id == combo_product_id,
+                ComboInventoryRecord.warehouse_id == warehouse_id
+            )
+        )
+    )
+    combo_inventory = combo_inventory_result.scalar_one_or_none()
+
+    if not combo_inventory:
+        return {"max_quantity": 0, "limiting_factor": "库存记录不存在"}
+
+    return {
+        "max_quantity": combo_inventory.finished,
+        "limiting_factor": "成品库存",
+        "current_finished": combo_inventory.finished
+    }
+
+
 @router.post("/assemble", response_model=dict)
 async def assemble_combo_product(
     request: ComboProductAssembleRequest,
@@ -801,29 +868,29 @@ async def assemble_combo_product(
         .where(ComboProduct.id == request.combo_product_id)
     )
     combo_product = combo_result.scalar_one_or_none()
-    
+
     if not combo_product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="组合商品不存在"
         )
-    
-    # 计算可组合数量
-    available_to_assemble = await calculate_available_to_assemble(
+
+    # 先检查最大可组装数量
+    max_quantity, limiting_factor = await calculate_available_to_assemble_with_details(
         combo_product, request.warehouse_id, db
     )
-    
-    if request.quantity > available_to_assemble:
+
+    if request.quantity > max_quantity:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"可组合数量不足，最多可组合 {available_to_assemble} 件"
+            detail=f"组装数量超出限制，最大可组装数量：{max_quantity}，限制因素：{limiting_factor}"
         )
-    
+
     try:
         # 1. 扣减基础商品的半成品库存和基础商品的包材
         for item in combo_product.combo_items:
             needed_quantity = item.quantity * request.quantity
-            
+
             # 获取基础商品库存
             inventory_result = await db.execute(
                 select(InventoryRecord).where(
@@ -834,21 +901,21 @@ async def assemble_combo_product(
                 )
             )
             base_inventory = inventory_result.scalar_one_or_none()
-            
+
             if not base_inventory or base_inventory.semi_finished < needed_quantity:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=f"基础商品 {item.base_product.name} 半成品库存不足"
                 )
-            
+
             # 扣减基础商品半成品库存
             base_inventory.semi_finished -= needed_quantity
-            
+
             # 扣减基础商品在此组合中配置的包材
             if item.packaging_relations:
                 for packaging_relation in item.packaging_relations:
                     packaging_needed = packaging_relation.quantity * needed_quantity
-                    
+
                     # 获取包材库存
                     packaging_inventory_result = await db.execute(
                         select(InventoryRecord).where(
@@ -859,22 +926,22 @@ async def assemble_combo_product(
                         )
                     )
                     packaging_inventory = packaging_inventory_result.scalar_one_or_none()
-                    
+
                     if not packaging_inventory or packaging_inventory.semi_finished < packaging_needed:
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
                             detail=f"基础商品 {item.base_product.name} 的包材 {packaging_relation.packaging.name} 半成品库存不足，需要 {packaging_needed}，现有 {packaging_inventory.semi_finished if packaging_inventory else 0}"
                         )
-                    
+
                     # 扣减包材库存
                     packaging_inventory.semi_finished -= packaging_needed
-        
+
         # 2. 扣减组合商品本身的包材半成品库存
         # 优先使用新的多包材关系
         if combo_product.packaging_relations:
             for packaging_relation in combo_product.packaging_relations:
                 packaging_needed = packaging_relation.quantity * request.quantity
-                
+
                 # 获取包材库存
                 packaging_inventory_result = await db.execute(
                     select(InventoryRecord).where(
@@ -885,16 +952,16 @@ async def assemble_combo_product(
                     )
                 )
                 packaging_inventory = packaging_inventory_result.scalar_one_or_none()
-                
+
                 if not packaging_inventory or packaging_inventory.semi_finished < packaging_needed:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"组合商品包材 {packaging_relation.packaging.name} 半成品库存不足，需要 {packaging_needed}，现有 {packaging_inventory.semi_finished if packaging_inventory else 0}"
                     )
-                
+
                 # 扣减包材半成品库存
                 packaging_inventory.semi_finished -= packaging_needed
-        
+
         # 3. 增加组合商品成品库存
         combo_inventory_result = await db.execute(
             select(ComboInventoryRecord).where(
@@ -905,7 +972,7 @@ async def assemble_combo_product(
             )
         )
         combo_inventory = combo_inventory_result.scalar_one_or_none()
-        
+
         if not combo_inventory:
             combo_inventory = ComboInventoryRecord(
                 combo_product_id=request.combo_product_id,
@@ -914,9 +981,9 @@ async def assemble_combo_product(
                 shipped=0
             )
             db.add(combo_inventory)
-        
+
         combo_inventory.finished += request.quantity
-        
+
         # 记录库存变动
         transaction = ComboInventoryTransaction(
             combo_product_id=request.combo_product_id,
@@ -926,15 +993,15 @@ async def assemble_combo_product(
             notes=request.notes
         )
         db.add(transaction)
-        
+
         await db.commit()
-        
+
         return {
             "message": f"成功组装 {request.quantity} 件组合商品",
             "combo_product_name": combo_product.name,
             "quantity": request.quantity
         }
-        
+
     except Exception as e:
         await db.rollback()
         raise HTTPException(
@@ -962,24 +1029,29 @@ async def ship_combo_product(
         )
     )
     combo_inventory = combo_inventory_result.scalar_one_or_none()
-    
+
     if not combo_inventory:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="组合商品库存记录不存在"
         )
-    
-    if combo_inventory.finished < request.quantity:
+
+    # 先检查最大可出库数量
+    max_quantity_info = await get_max_ship_quantity(
+        request.combo_product_id, request.warehouse_id, db, current_user
+    )
+
+    if request.quantity > max_quantity_info["max_quantity"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"成品库存不足，当前库存：{combo_inventory.finished}"
+            detail=f"出库数量超出限制，最大可出库数量：{max_quantity_info['max_quantity']}，当前成品库存：{max_quantity_info['current_finished']}"
         )
-    
+
     try:
         # 更新库存
         combo_inventory.finished -= request.quantity
         combo_inventory.shipped += request.quantity
-        
+
         # 记录库存变动
         transaction = ComboInventoryTransaction(
             combo_product_id=request.combo_product_id,
@@ -989,21 +1061,104 @@ async def ship_combo_product(
             notes=request.notes
         )
         db.add(transaction)
-        
+
         await db.commit()
-        
+
         return {
             "message": f"成功出库 {request.quantity} 件组合商品",
             "combo_product_name": combo_inventory.combo_product.name,
             "quantity": request.quantity
         }
-        
+
     except Exception as e:
         await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"出库失败: {str(e)}"
         )
+
+
+async def calculate_available_to_assemble_with_details(combo_product: ComboProduct, warehouse_id: int, db: AsyncSession) -> tuple[int, str]:
+    """计算可组合数量并返回限制因素详细信息"""
+    if not combo_product.combo_items:
+        return 0, "没有基础商品配置"
+
+    min_available = float('inf')
+    limiting_factor = ""
+
+    # 1. 检查基础商品的半成品库存限制
+    for item in combo_product.combo_items:
+        # 获取基础商品库存
+        inventory_result = await db.execute(
+            select(InventoryRecord).where(
+                and_(
+                    InventoryRecord.product_id == item.base_product_id,
+                    InventoryRecord.warehouse_id == warehouse_id
+                )
+            )
+        )
+        base_inventory = inventory_result.scalar_one_or_none()
+
+        if not base_inventory:
+            return 0, f"基础商品 {item.base_product.name} 库存记录不存在"
+
+        # 计算这个基础商品的半成品可以支持多少个组合商品
+        available_for_this_item = base_inventory.semi_finished // item.quantity
+        if available_for_this_item < min_available:
+            min_available = available_for_this_item
+            limiting_factor = f"基础商品 {item.base_product.name} 半成品库存限制（需要 {item.quantity}，现有 {base_inventory.semi_finished}）"
+
+        # 检查基础商品在此组合中配置的包材限制
+        if hasattr(item, 'packaging_relations') and item.packaging_relations:
+            for packaging_relation in item.packaging_relations:
+                packaging_inventory_result = await db.execute(
+                    select(InventoryRecord).where(
+                        and_(
+                            InventoryRecord.product_id == packaging_relation.packaging_id,
+                            InventoryRecord.warehouse_id == warehouse_id
+                        )
+                    )
+                )
+                packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+
+                if not packaging_inventory:
+                    return 0, f"基础商品 {item.base_product.name} 的包材 {packaging_relation.packaging.name} 库存记录不存在"
+
+                # 计算这个包材可以支持多少个基础商品
+                base_product_quantity_from_packaging = packaging_inventory.semi_finished // packaging_relation.quantity
+                # 再计算这些基础商品可以支持多少个组合商品
+                available_from_packaging = base_product_quantity_from_packaging // item.quantity
+                if available_from_packaging < min_available:
+                    min_available = available_from_packaging
+                    limiting_factor = f"基础商品 {item.base_product.name} 的包材 {packaging_relation.packaging.name} 库存限制（需要 {packaging_relation.quantity}，现有 {packaging_inventory.semi_finished}）"
+
+    # 2. 检查组合商品本身的包材半成品库存限制
+    if combo_product.packaging_relations:
+        for packaging_relation in combo_product.packaging_relations:
+            packaging_inventory_result = await db.execute(
+                select(InventoryRecord).where(
+                    and_(
+                        InventoryRecord.product_id == packaging_relation.packaging_id,
+                        InventoryRecord.warehouse_id == warehouse_id
+                    )
+                )
+            )
+            packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+
+            if not packaging_inventory:
+                return 0, f"组合商品包材 {packaging_relation.packaging.name} 库存记录不存在"
+
+            # 计算这个包材可以支持多少个组合商品
+            available_from_combo_packaging = packaging_inventory.semi_finished // packaging_relation.quantity
+            if available_from_combo_packaging < min_available:
+                min_available = available_from_combo_packaging
+                limiting_factor = f"组合商品包材 {packaging_relation.packaging.name} 库存限制（需要 {packaging_relation.quantity}，现有 {packaging_inventory.semi_finished}）"
+
+    result = int(min_available) if min_available != float('inf') else 0
+    if result == 0 and not limiting_factor:
+        limiting_factor = "库存不足"
+
+    return result, limiting_factor
 
 
 async def calculate_available_to_assemble(combo_product: ComboProduct, warehouse_id: int, db: AsyncSession) -> int:

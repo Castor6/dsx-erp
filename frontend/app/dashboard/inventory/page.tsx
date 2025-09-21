@@ -117,8 +117,10 @@ interface ActionForm {
   product_id?: number
   combo_product_id?: number
   warehouse_id: number
-  quantity: number
+  quantity: number | string
   notes?: string
+  maxQuantity?: number
+  limitingFactor?: string
 }
 
 interface ComboProductDetails {
@@ -193,7 +195,7 @@ export default function InventoryPage() {
   const [actionType, setActionType] = useState<'package' | 'ship' | 'assemble' | 'combo-ship'>('package')
   const [actionForm, setActionForm] = useState<ActionForm>({
     warehouse_id: 0,
-    quantity: 1,
+    quantity: '',
     notes: ''
   })
   const [isComboDetailsDialogOpen, setIsComboDetailsDialogOpen] = useState(false)
@@ -408,7 +410,7 @@ export default function InventoryPage() {
   const handleAction = async (e: React.FormEvent) => {
     e.preventDefault()
     
-    if (!actionForm.warehouse_id || actionForm.quantity <= 0) {
+    if (!actionForm.warehouse_id || !actionForm.quantity || Number(actionForm.quantity) <= 0) {
       toast({
         title: "错误",
         description: "请填写所有必填字段",
@@ -428,7 +430,7 @@ export default function InventoryPage() {
           payload = {
             product_id: actionForm.product_id,
             warehouse_id: actionForm.warehouse_id,
-            quantity: actionForm.quantity
+            quantity: Number(actionForm.quantity)
           }
           successMessage = '商品打包成功'
           break
@@ -437,7 +439,7 @@ export default function InventoryPage() {
           payload = {
             product_id: actionForm.product_id,
             warehouse_id: actionForm.warehouse_id,
-            quantity: actionForm.quantity,
+            quantity: Number(actionForm.quantity),
             notes: actionForm.notes || ''
           }
           successMessage = '商品出库成功'
@@ -447,7 +449,7 @@ export default function InventoryPage() {
           payload = {
             combo_product_id: actionForm.combo_product_id,
             warehouse_id: actionForm.warehouse_id,
-            quantity: actionForm.quantity,
+            quantity: Number(actionForm.quantity),
             notes: actionForm.notes || ''
           }
           successMessage = '组合商品打包成功'
@@ -457,7 +459,7 @@ export default function InventoryPage() {
           payload = {
             combo_product_id: actionForm.combo_product_id,
             warehouse_id: actionForm.warehouse_id,
-            quantity: actionForm.quantity,
+            quantity: Number(actionForm.quantity),
             notes: actionForm.notes || ''
           }
           successMessage = '组合商品出库成功'
@@ -473,8 +475,10 @@ export default function InventoryPage() {
       setIsActionDialogOpen(false)
       setActionForm({
         warehouse_id: 0,
-        quantity: 1,
-        notes: ''
+        quantity: '',
+        notes: '',
+        maxQuantity: 0,
+        limitingFactor: ''
       })
       
       // 刷新数据
@@ -493,20 +497,74 @@ export default function InventoryPage() {
     }
   }
 
-  const openActionDialog = (
+  const openActionDialog = async (
     type: 'package' | 'ship' | 'assemble' | 'combo-ship',
     productId?: number,
     comboProductId?: number,
     warehouseId?: number
   ) => {
     setActionType(type)
-    setActionForm({
+
+    const baseForm = {
       product_id: productId,
       combo_product_id: comboProductId,
       warehouse_id: warehouseId || selectedWarehouse || 0,
-      quantity: 1,
-      notes: ''
-    })
+      quantity: '',
+      notes: '',
+      maxQuantity: 0,
+      limitingFactor: ''
+    }
+
+    // 获取最大可操作数量
+    try {
+      let endpoint = ''
+      let params = ''
+
+      const targetWarehouseId = warehouseId || selectedWarehouse
+      if (!targetWarehouseId) {
+        toast({
+          title: "错误",
+          description: "请先选择仓库",
+          variant: "destructive",
+        })
+        return
+      }
+
+      switch (type) {
+        case 'package':
+          endpoint = `/api/v1/inventory/product/${productId}/max-package-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
+        case 'ship':
+          endpoint = `/api/v1/inventory/product/${productId}/max-ship-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
+        case 'assemble':
+          endpoint = `/api/v1/combo-products/${comboProductId}/max-assemble-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
+        case 'combo-ship':
+          endpoint = `/api/v1/combo-products/${comboProductId}/max-ship-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
+      }
+
+      const response = await api.get(`${endpoint}${params}`)
+
+      setActionForm({
+        ...baseForm,
+        maxQuantity: response.data.max_quantity || 0,
+        limitingFactor: response.data.limiting_factor || '未知限制'
+      })
+    } catch (error) {
+      console.error('获取最大数量失败:', error)
+      setActionForm({
+        ...baseForm,
+        maxQuantity: 0,
+        limitingFactor: '获取最大数量失败'
+      })
+    }
+
     setIsActionDialogOpen(true)
   }
 
@@ -1122,27 +1180,90 @@ export default function InventoryPage() {
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAction} className="space-y-4">
+            {/* 最大数量提示 */}
+            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+              <div className="flex items-center gap-2 text-blue-700">
+                <TrendingUp className="h-4 w-4" />
+                <span className="font-medium">数量限制信息</span>
+              </div>
+              <div className="mt-1 text-sm text-blue-600">
+                最大可操作数量：<span className="font-semibold">{actionForm.maxQuantity || 0}</span>
+                {actionForm.limitingFactor && (
+                  <div className="text-xs mt-1 text-blue-500">
+                    限制因素：{actionForm.limitingFactor}
+                  </div>
+                )}
+              </div>
+            </div>
+
             <div>
               <Label>数量 *</Label>
-              <Input
-                type="number"
-                min="1"
-                value={actionForm.quantity}
-                onChange={(e) => setActionForm(prev => ({ 
-                  ...prev, 
-                  quantity: parseInt(e.target.value) || 1 
-                }))}
-                required
-              />
+              <div className="flex gap-2">
+                <Input
+                  type="number"
+                  min="1"
+                  max={actionForm.maxQuantity || undefined}
+                  value={actionForm.quantity}
+                  onChange={(e) => {
+                    const value = e.target.value
+                    const numValue = Number(value)
+
+                    // 实时验证并显示错误提示
+                    if (value && actionForm.maxQuantity && numValue > actionForm.maxQuantity) {
+                      toast({
+                        title: "数量超限",
+                        description: `输入数量超过最大可操作数量 ${actionForm.maxQuantity}`,
+                        variant: "destructive",
+                        duration: 2000
+                      })
+                    }
+
+                    setActionForm(prev => ({
+                      ...prev,
+                      quantity: value || ''
+                    }))
+                  }}
+                  placeholder={`请输入数量（最大：${actionForm.maxQuantity || 0}）`}
+                  className={`flex-1 ${
+                    actionForm.quantity &&
+                    actionForm.maxQuantity &&
+                    Number(actionForm.quantity) > actionForm.maxQuantity
+                      ? 'border-red-500 focus:ring-red-500'
+                      : ''
+                  }`}
+                  required
+                />
+                {actionForm.maxQuantity && actionForm.maxQuantity > 0 && (
+                  <Button
+                    type="button"
+                    variant="outline"
+                    size="sm"
+                    onClick={() => setActionForm(prev => ({
+                      ...prev,
+                      quantity: prev.maxQuantity?.toString() || ''
+                    }))}
+                    className="whitespace-nowrap"
+                  >
+                    使用最大数量
+                  </Button>
+                )}
+              </div>
+              {actionForm.quantity &&
+               actionForm.maxQuantity &&
+               Number(actionForm.quantity) > actionForm.maxQuantity && (
+                <p className="text-sm text-red-500 mt-1">
+                  数量不能超过 {actionForm.maxQuantity}
+                </p>
+              )}
             </div>
             {(actionType === 'ship' || actionType === 'assemble' || actionType === 'combo-ship') && (
               <div>
                 <Label>备注</Label>
                 <Input
                   value={actionForm.notes || ''}
-                  onChange={(e) => setActionForm(prev => ({ 
-                    ...prev, 
-                    notes: e.target.value 
+                  onChange={(e) => setActionForm(prev => ({
+                    ...prev,
+                    notes: e.target.value
                   }))}
                   placeholder="请输入备注（可选）"
                 />
@@ -1152,7 +1273,14 @@ export default function InventoryPage() {
               <Button type="button" variant="outline" onClick={() => setIsActionDialogOpen(false)}>
                 取消
               </Button>
-              <Button type="submit">
+              <Button
+                type="submit"
+                disabled={
+                  !actionForm.quantity ||
+                  Number(actionForm.quantity) <= 0 ||
+                  (actionForm.maxQuantity && Number(actionForm.quantity) > actionForm.maxQuantity)
+                }
+              >
                 确认操作
               </Button>
             </DialogFooter>

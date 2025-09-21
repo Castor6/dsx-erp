@@ -188,6 +188,109 @@ async def get_inventory_summary(
     return summaries
 
 
+@router.get("/product/{product_id}/max-package-quantity")
+async def get_max_package_quantity(
+    product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取基础商品最大可打包数量"""
+    # 获取商品信息
+    result = await db.execute(
+        select(Product).where(Product.id == product_id)
+    )
+    product = result.scalar_one_or_none()
+
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="商品不存在"
+        )
+
+    # 获取基础商品的半成品库存
+    inventory_result = await db.execute(
+        select(InventoryRecord).where(
+            InventoryRecord.product_id == product_id,
+            InventoryRecord.warehouse_id == warehouse_id
+        )
+    )
+    inventory = inventory_result.scalar_one_or_none()
+
+    if not inventory:
+        return {"max_quantity": 0, "limiting_factor": "库存记录不存在"}
+
+    max_quantity = inventory.semi_finished
+    limiting_factor = "半成品库存"
+
+    # 如果是商品类型，需要检查包材限制
+    if product.sale_type == SaleType.PRODUCT:
+        # 检查新的多包材关系
+        packaging_relations_result = await db.execute(
+            select(ProductPackagingRelation)
+            .options(selectinload(ProductPackagingRelation.packaging))
+            .where(ProductPackagingRelation.product_id == product.id)
+        )
+        packaging_relations = packaging_relations_result.scalars().all()
+
+        if packaging_relations:
+            for relation in packaging_relations:
+                # 检查包材库存
+                packaging_result = await db.execute(
+                    select(InventoryRecord).where(
+                        InventoryRecord.product_id == relation.packaging_id,
+                        InventoryRecord.warehouse_id == warehouse_id
+                    )
+                )
+                packaging_inventory = packaging_result.scalar_one_or_none()
+
+                if not packaging_inventory:
+                    max_quantity = 0
+                    limiting_factor = f"包材 {relation.packaging.name} 库存记录不存在"
+                    break
+
+                # 计算这个包材可以支持多少个商品
+                max_from_packaging = packaging_inventory.semi_finished // relation.quantity
+                if max_from_packaging < max_quantity:
+                    max_quantity = max_from_packaging
+                    limiting_factor = f"包材 {relation.packaging.name} 库存限制"
+        # 如果是商品类型但没有配置包材，限制因素就是半成品库存
+        # limiting_factor 已经设置为 "半成品库存"，这里不需要修改
+
+    return {
+        "max_quantity": max_quantity,
+        "limiting_factor": limiting_factor,
+        "current_semi_finished": inventory.semi_finished if inventory else 0
+    }
+
+
+@router.get("/product/{product_id}/max-ship-quantity")
+async def get_max_ship_quantity(
+    product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取基础商品最大可出库数量"""
+    # 获取商品的成品库存
+    inventory_result = await db.execute(
+        select(InventoryRecord).where(
+            InventoryRecord.product_id == product_id,
+            InventoryRecord.warehouse_id == warehouse_id
+        )
+    )
+    inventory = inventory_result.scalar_one_or_none()
+
+    if not inventory:
+        return {"max_quantity": 0, "limiting_factor": "库存记录不存在"}
+
+    return {
+        "max_quantity": inventory.finished,
+        "limiting_factor": "成品库存",
+        "current_finished": inventory.finished
+    }
+
+
 @router.post("/package")
 async def package_products(
     request: PackagingRequest,
@@ -195,18 +298,29 @@ async def package_products(
     current_user: User = Depends(get_current_active_user)
 ):
     """商品打包（半成品转成品）"""
+    # 先检查最大可打包数量
+    max_quantity_info = await get_max_package_quantity(
+        request.product_id, request.warehouse_id, db, current_user
+    )
+
+    if request.quantity > max_quantity_info["max_quantity"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"打包数量超出限制，最大可打包数量：{max_quantity_info['max_quantity']}，限制因素：{max_quantity_info['limiting_factor']}"
+        )
+
     # 获取商品信息
     result = await db.execute(
         select(Product).where(Product.id == request.product_id)
     )
     product = result.scalar_one_or_none()
-    
+
     if not product:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="商品不存在"
         )
-    
+
     # 检查是否是商品类型（需要消耗包材）
     if product.sale_type == SaleType.PRODUCT:
         # 先查询商品的包材关系
@@ -216,12 +330,12 @@ async def package_products(
             .where(ProductPackagingRelation.product_id == product.id)
         )
         packaging_relations = packaging_relations_result.scalars().all()
-        
+
         # 如果有新的包材关系，使用新的多包材逻辑
         if packaging_relations:
             for relation in packaging_relations:
                 needed_quantity = relation.quantity * request.quantity
-                
+
                 # 检查包材库存
                 packaging_result = await db.execute(
                     select(InventoryRecord).where(
@@ -230,16 +344,16 @@ async def package_products(
                     )
                 )
                 packaging_inventory = packaging_result.scalar_one_or_none()
-                
+
                 if not packaging_inventory or packaging_inventory.semi_finished < needed_quantity:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail=f"包材 {relation.packaging.name} 半成品库存不足，需要 {needed_quantity}，现有 {packaging_inventory.semi_finished if packaging_inventory else 0}"
                     )
-                
+
                 # 消耗包材半成品
                 packaging_inventory.semi_finished -= needed_quantity
-                
+
                 # 记录包材消耗
                 await _create_inventory_transaction(
                     db,
@@ -251,39 +365,7 @@ async def package_products(
                     quantity=-needed_quantity,
                     notes=f"用于打包商品 {product.sku}，单件需要 {relation.quantity} 个"
                 )
-        
-        # 向后兼容：如果没有新的包材关系但有旧的packaging_id，使用旧逻辑
-        elif product.packaging_id:
-            # 检查包材库存
-            packaging_result = await db.execute(
-                select(InventoryRecord).where(
-                    InventoryRecord.product_id == product.packaging_id,
-                    InventoryRecord.warehouse_id == request.warehouse_id
-                )
-            )
-            packaging_inventory = packaging_result.scalar_one_or_none()
-            
-            if not packaging_inventory or packaging_inventory.semi_finished < request.quantity:
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail="包材半成品库存不足"
-                )
-            
-            # 消耗包材半成品
-            packaging_inventory.semi_finished -= request.quantity
-            
-            # 记录包材消耗
-            await _create_inventory_transaction(
-                db,
-                product_id=product.packaging_id,
-                warehouse_id=request.warehouse_id,
-                transaction_type="包材消耗",
-                from_status=InventoryStatus.SEMI_FINISHED,
-                to_status=None,
-                quantity=-request.quantity,
-                notes=f"用于打包商品 {product.sku}"
-            )
-    
+
     # 转移商品库存：半成品 -> 成品
     await _transfer_inventory(
         db,
@@ -293,7 +375,7 @@ async def package_products(
         to_status="finished",
         quantity=request.quantity
     )
-    
+
     # 记录库存变动
     await _create_inventory_transaction(
         db,
@@ -305,9 +387,9 @@ async def package_products(
         quantity=request.quantity,
         notes="商品打包完成"
     )
-    
+
     await db.commit()
-    
+
     return {"message": "打包成功", "quantity": request.quantity}
 
 
@@ -318,6 +400,17 @@ async def ship_products(
     current_user: User = Depends(get_current_active_user)
 ):
     """商品出库（成品转出库）"""
+    # 先检查最大可出库数量
+    max_quantity_info = await get_max_ship_quantity(
+        request.product_id, request.warehouse_id, db, current_user
+    )
+
+    if request.quantity > max_quantity_info["max_quantity"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"出库数量超出限制，最大可出库数量：{max_quantity_info['max_quantity']}，当前成品库存：{max_quantity_info['current_finished']}"
+        )
+
     # 转移库存：成品 -> 出库
     await _transfer_inventory(
         db,
@@ -327,7 +420,7 @@ async def ship_products(
         to_status="shipped",
         quantity=request.quantity
     )
-    
+
     # 记录库存变动
     await _create_inventory_transaction(
         db,
@@ -339,9 +432,9 @@ async def ship_products(
         quantity=request.quantity,
         notes=request.notes or "商品出库"
     )
-    
+
     await db.commit()
-    
+
     return {"message": "出库成功", "quantity": request.quantity}
 
 

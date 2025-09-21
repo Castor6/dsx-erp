@@ -44,7 +44,7 @@ export const MultiPackagingSelector = ({
   const handleAddPackaging = () => {
     const newPackaging: PackagingRelation = {
       packaging_id: 0,
-      quantity: 1
+      quantity: ''
     }
     const updated = [...localPackaging, newPackaging]
     setLocalPackaging(updated)
@@ -57,7 +57,7 @@ export const MultiPackagingSelector = ({
     onChange(updated)
   }
 
-  const handlePackagingChange = (index: number, field: keyof PackagingRelation, value: number) => {
+  const handlePackagingChange = (index: number, field: keyof PackagingRelation, value: number | string) => {
     const updated = localPackaging.map((item, i) => 
       i === index ? { ...item, [field]: value } : item
     )
@@ -120,7 +120,7 @@ export const MultiPackagingSelector = ({
                   type="number"
                   min="1"
                   value={item.quantity}
-                  onChange={(e) => handlePackagingChange(index, 'quantity', parseInt(e.target.value) || 1)}
+                  onChange={(e) => handlePackagingChange(index, 'quantity', e.target.value || '')}
                   className="text-center"
                   disabled={disabled}
                 />

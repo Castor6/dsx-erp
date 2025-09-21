@@ -51,7 +51,7 @@ export interface Warehouse {
 // 包材关系相关类型
 export interface PackagingRelation {
   packaging_id: number
-  quantity: number
+  quantity: number | string
 }
 
 export interface ProductPackagingRelation extends PackagingRelation {

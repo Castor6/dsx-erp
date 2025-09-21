@@ -82,8 +82,8 @@ interface Warehouse {
 
 interface OrderItem {
   product_id: number
-  quantity: number
-  unit_price: number
+  quantity: number | string
+  unit_price: number | string
 }
 
 interface OrderForm {
@@ -142,7 +142,7 @@ export default function PurchaseOrdersPage() {
     warehouse_id: null,
     items: []
   })
-  const [receiveItems, setReceiveItems] = useState<{ item_id: number, received_quantity: number }[]>([])
+  const [receiveItems, setReceiveItems] = useState<{ item_id: number, received_quantity: number | string }[]>([])
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
   const { toast } = useToast()
 
@@ -284,7 +284,7 @@ export default function PurchaseOrdersPage() {
   const handleAddItem = () => {
     setFormData(prev => ({
       ...prev,
-      items: [...prev.items, { product_id: 0, quantity: 1, unit_price: 0 }]
+      items: [...prev.items, { product_id: 0, quantity: '', unit_price: '' }]
     }))
   }
 
@@ -325,11 +325,11 @@ export default function PurchaseOrdersPage() {
         errors.push({ field: 'product_id', message: `请选择商品` })
       }
 
-      if (!numberValidator(1)(item.quantity)) {
+      if (!numberValidator(1)(Number(item.quantity))) {
         errors.push({ field: 'quantity', message: `数量必须大于0` })
       }
 
-      if (!numberValidator(0.01)(item.unit_price)) {
+      if (!numberValidator(0.01)(Number(item.unit_price))) {
         errors.push({ field: 'unit_price', message: `单价必须大于0` })
       }
 
@@ -394,7 +394,7 @@ export default function PurchaseOrdersPage() {
     // 初始化到货数量
     const initialReceiveItems = order.items?.map(item => ({
       item_id: item.id,
-      received_quantity: 0
+      received_quantity: ''
     })) || []
     setReceiveItems(initialReceiveItems)
     setIsReceiveDialogOpen(true)
@@ -404,7 +404,7 @@ export default function PurchaseOrdersPage() {
     if (!selectedOrder) return
 
     // 过滤出有到货数量的项目
-    const validItems = receiveItems.filter(item => item.received_quantity > 0)
+    const validItems = receiveItems.filter(item => Number(item.received_quantity) > 0)
     
     if (validItems.length === 0) {
       toast({
@@ -417,7 +417,10 @@ export default function PurchaseOrdersPage() {
 
     try {
       await api.post(`/api/v1/purchase-orders/${selectedOrder.id}/receive`, {
-        items: validItems
+        items: validItems.map(item => ({
+          ...item,
+          received_quantity: Number(item.received_quantity)
+        }))
       })
       
       toast({
@@ -629,7 +632,7 @@ export default function PurchaseOrdersPage() {
                             type="number"
                             min="1"
                             value={item.quantity}
-                            onChange={(e) => handleItemChange(index, 'quantity', parseInt(e.target.value) || 0)}
+                            onChange={(e) => handleItemChange(index, 'quantity', e.target.value || '')}
                             placeholder="数量"
                           />
                         </div>
@@ -641,7 +644,7 @@ export default function PurchaseOrdersPage() {
                             step="0.01"
                             min="0"
                             value={item.unit_price}
-                            onChange={(e) => handleItemChange(index, 'unit_price', parseFloat(e.target.value) || 0)}
+                            onChange={(e) => handleItemChange(index, 'unit_price', e.target.value || '')}
                             placeholder="单价"
                           />
                         </div>
@@ -649,7 +652,7 @@ export default function PurchaseOrdersPage() {
                         <div className="col-span-2">
                           <Label className="text-xs">小计</Label>
                           <div className="text-sm font-medium py-2">
-                            ¥{(item.quantity * item.unit_price).toFixed(2)}
+                            ¥{(Number(item.quantity) * Number(item.unit_price)).toFixed(2)}
                           </div>
                         </div>
                         
@@ -671,7 +674,7 @@ export default function PurchaseOrdersPage() {
                 {formData.items.length > 0 && (
                   <div className="text-right pt-2 border-t">
                     <span className="text-lg font-semibold">
-                      总计: ¥{formData.items.reduce((total, item) => total + (item.quantity * item.unit_price), 0).toFixed(2)}
+                      总计: ¥{formData.items.reduce((total, item) => total + (Number(item.quantity) * Number(item.unit_price)), 0).toFixed(2)}
                     </span>
                   </div>
                 )}
@@ -927,11 +930,11 @@ export default function PurchaseOrdersPage() {
                           type="number"
                           min="0"
                           max={item.quantity - item.received_quantity}
-                          value={receiveItems[index]?.received_quantity || 0}
+                          value={receiveItems[index]?.received_quantity || ''}
                           onChange={(e) => {
-                            const value = parseInt(e.target.value) || 0
-                            setReceiveItems(prev => 
-                              prev.map((ri, i) => 
+                            const value = e.target.value
+                            setReceiveItems(prev =>
+                              prev.map((ri, i) =>
                                 i === index ? { ...ri, received_quantity: value } : ri
                               )
                             )

@@ -88,7 +88,7 @@ interface ComboProductForm {
 
 interface ComboProductItemForm {
   base_product_id: number | null
-  quantity: number
+  quantity: number | string
   packaging_relations: PackagingRelation[]
 }
 
@@ -112,7 +112,7 @@ export default function ComboProductsPage() {
     name: '',
     sku: '',
     warehouse_ids: [],
-    combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
+    combo_items: [{ base_product_id: null, quantity: '', packaging_relations: [] }],
     packaging_relations: []
   })
   
@@ -311,7 +311,7 @@ export default function ComboProductsPage() {
         name: '',
         sku: '',
         warehouse_ids: [],
-        combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
+        combo_items: [{ base_product_id: null, quantity: '', packaging_relations: [] }],
         packaging_relations: []
       })
     }
@@ -352,7 +352,7 @@ export default function ComboProductsPage() {
       })
     } else {
       formData.packaging_relations.forEach((packaging, index) => {
-        if (!packaging.packaging_id || packaging.quantity <= 0) {
+        if (!packaging.packaging_id || Number(packaging.quantity) <= 0) {
           basicFieldsErrors.push({
             field: `packaging_relations[${index}]`,
             message: `包材配置 ${index + 1} 不完整，请检查包材选择和数量`
@@ -369,7 +369,7 @@ export default function ComboProductsPage() {
         errors.push({ field: 'base_product_id', message: `请选择基础商品` })
       }
 
-      if (!numberValidator(1)(item.quantity)) {
+      if (!numberValidator(1)(Number(item.quantity))) {
         errors.push({ field: 'quantity', message: `数量必须大于0` })
       }
 
@@ -396,10 +396,16 @@ export default function ComboProductsPage() {
         warehouse_ids: formData.warehouse_ids,
         combo_items: formData.combo_items.map(item => ({
           base_product_id: item.base_product_id,
-          quantity: item.quantity,
-          packaging_relations: item.packaging_relations || []
+          quantity: Number(item.quantity),
+          packaging_relations: item.packaging_relations.map(pr => ({
+            packaging_id: pr.packaging_id,
+            quantity: Number(pr.quantity)
+          })) || []
         })),
-        packaging_relations: formData.packaging_relations || []
+        packaging_relations: formData.packaging_relations.map(pr => ({
+          packaging_id: pr.packaging_id,
+          quantity: Number(pr.quantity)
+        })) || []
       }
 
       console.log('提交数据:', JSON.stringify(submitData, null, 2)) // 调试用
@@ -463,7 +469,7 @@ export default function ComboProductsPage() {
   const handleAddComboItem = () => {
     setFormData(prev => ({
       ...prev,
-      combo_items: [...prev.combo_items, { base_product_id: null, quantity: 1, packaging_relations: [] }]
+      combo_items: [...prev.combo_items, { base_product_id: null, quantity: '', packaging_relations: [] }]
     }))
   }
 
@@ -725,7 +731,7 @@ export default function ComboProductsPage() {
                               type="number"
                               min="1"
                               value={item.quantity}
-                              onChange={(e) => handleComboItemChange(index, 'quantity', parseInt(e.target.value) || 1)}
+                              onChange={(e) => handleComboItemChange(index, 'quantity', e.target.value || '')}
                               className="text-center"
                             />
                           </div>
