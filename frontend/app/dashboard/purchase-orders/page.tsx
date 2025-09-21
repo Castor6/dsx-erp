@@ -33,6 +33,7 @@ import { useToast } from '@/hooks/use-toast'
 import { Plus, ShoppingCart, Package, Trash2, Eye } from 'lucide-react'
 import { api } from '@/lib/api'
 import SearchableSelect from '@/components/ui/searchable-select'
+import { handleApiError, validateRequiredFields, validateArrayFields, lengthValidator, numberValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
 
 interface PurchaseOrder {
   id: number
@@ -142,6 +143,7 @@ export default function PurchaseOrdersPage() {
     items: []
   })
   const [receiveItems, setReceiveItems] = useState<{ item_id: number, received_quantity: number }[]>([])
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
   const { toast } = useToast()
 
   const fetchOrders = async (page: number = 1, size: number = 5) => {
@@ -157,10 +159,11 @@ export default function PurchaseOrdersPage() {
         has_next: data.has_next,
         has_prev: data.has_prev
       })
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取采购订单列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -191,10 +194,11 @@ export default function PurchaseOrdersPage() {
     try {
       const response = await api.get('/api/v1/warehouses/')
       setWarehouses(response.data)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取仓库列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -244,6 +248,9 @@ export default function PurchaseOrdersPage() {
   }, [])
 
   const handleOpenCreateDialog = () => {
+    // 清空所有验证错误
+    setValidationErrors([])
+
     setFormData({
       supplier_id: null,
       purchaser: '',
@@ -255,6 +262,7 @@ export default function PurchaseOrdersPage() {
 
   const handleCloseCreateDialog = () => {
     setIsCreateDialogOpen(false)
+    setValidationErrors([])
     setFormData({
       supplier_id: null,
       purchaser: '',
@@ -298,26 +306,46 @@ export default function PurchaseOrdersPage() {
 
   const handleSubmitOrder = async (e: React.FormEvent) => {
     e.preventDefault()
-    
-    if (!formData.supplier_id || !formData.purchaser || !formData.warehouse_id || formData.items.length === 0) {
+
+    // 清除之前的验证错误
+    setValidationErrors([])
+
+    // 验证基本必填字段
+    const basicFieldsErrors = validateRequiredFields(formData, [
+      { field: 'supplier_id', label: '供应商' },
+      { field: 'purchaser', label: '采购人员', validator: lengthValidator(1, 50) },
+      { field: 'warehouse_id', label: '收货仓库' }
+    ])
+
+    // 验证采购明细
+    const itemsErrors = validateArrayFields(formData.items, '采购明细', (item, index) => {
+      const errors: ValidationError[] = []
+
+      if (!item.product_id) {
+        errors.push({ field: 'product_id', message: `请选择商品` })
+      }
+
+      if (!numberValidator(1)(item.quantity)) {
+        errors.push({ field: 'quantity', message: `数量必须大于0` })
+      }
+
+      if (!numberValidator(0.01)(item.unit_price)) {
+        errors.push({ field: 'unit_price', message: `单价必须大于0` })
+      }
+
+      return errors
+    })
+
+    const allErrors = [...basicFieldsErrors, ...itemsErrors]
+
+    if (hasErrors(allErrors)) {
+      setValidationErrors(allErrors)
       toast({
-        title: "错误",
-        description: "请填写所有必填字段并添加采购明细",
+        title: "表单验证失败",
+        description: formatErrorsForToast(allErrors),
         variant: "destructive",
       })
       return
-    }
-
-    // 检查明细项目
-    for (const item of formData.items) {
-      if (!item.product_id || item.quantity <= 0 || item.unit_price <= 0) {
-        toast({
-          title: "错误",
-          description: "请检查采购明细，确保所有字段都已正确填写",
-          variant: "destructive",
-        })
-        return
-      }
     }
 
     try {
@@ -330,9 +358,17 @@ export default function PurchaseOrdersPage() {
       handleCloseCreateDialog()
       fetchOrders(1) // 创建成功后回到第一页
     } catch (error: any) {
+      const apiError = handleApiError(error)
+
+      // 尝试将API错误映射到具体字段
+      const fieldError = apiErrorToFieldError(apiError)
+      if (fieldError) {
+        setValidationErrors([fieldError])
+      }
+
       toast({
         title: "错误",
-        description: error.response?.data?.detail || "创建失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -343,10 +379,11 @@ export default function PurchaseOrdersPage() {
       const response = await api.get(`/api/v1/purchase-orders/${orderId}`)
       setSelectedOrder(response.data)
       setIsDetailDialogOpen(true)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取订单详情失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -391,9 +428,10 @@ export default function PurchaseOrdersPage() {
       setIsReceiveDialogOpen(false)
         fetchOrders(pagination.page, pagination.size) // 保持当前页
     } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: error.response?.data?.detail || "到货记录失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -413,9 +451,10 @@ export default function PurchaseOrdersPage() {
         const targetPage = pagination.page > maxPage ? maxPage : pagination.page
         fetchOrders(targetPage, pagination.size)
       } catch (error: any) {
+        const apiError = handleApiError(error)
         toast({
           title: "错误",
-          description: error.response?.data?.detail || "删除失败",
+          description: apiError.message,
           variant: "destructive",
         })
       }
@@ -497,10 +536,17 @@ export default function PurchaseOrdersPage() {
                   <Input
                     id="purchaser"
                     value={formData.purchaser}
-                    onChange={(e) => setFormData(prev => ({ ...prev, purchaser: e.target.value }))}
+                    onChange={(e) => {
+                      setFormData(prev => ({ ...prev, purchaser: e.target.value }))
+                      setValidationErrors(prev => prev.filter(error => error.field !== 'purchaser'))
+                    }}
                     placeholder="请输入采购人员姓名"
+                    className={validationErrors.some(e => e.field === 'purchaser') ? 'border-red-500' : ''}
                     required
                   />
+                  {validationErrors.filter(e => e.field === 'purchaser').map((error, index) => (
+                    <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                  ))}
                 </div>
               </div>
               
@@ -508,9 +554,12 @@ export default function PurchaseOrdersPage() {
                 <Label htmlFor="warehouse_id">收货仓库 *</Label>
                 <Select
                   value={formData.warehouse_id?.toString() || ''}
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))}
+                  onValueChange={(value) => {
+                    setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))
+                    setValidationErrors(prev => prev.filter(error => error.field !== 'warehouse_id'))
+                  }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className={validationErrors.some(e => e.field === 'warehouse_id') ? 'border-red-500' : ''}>
                     <SelectValue placeholder="请选择收货仓库" />
                   </SelectTrigger>
                   <SelectContent>
@@ -521,6 +570,9 @@ export default function PurchaseOrdersPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                {validationErrors.filter(e => e.field === 'warehouse_id').map((error, index) => (
+                  <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                ))}
               </div>
 
               <div>

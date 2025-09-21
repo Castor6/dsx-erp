@@ -35,6 +35,7 @@ import { api } from '@/lib/api'
 import SearchableSelect from '@/components/ui/searchable-select'
 import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector'
 import { PackagingRelation, ComboItemPackagingRelation, ProductPackagingRelation, ComboProductPackagingRelation } from '@/types'
+import { handleApiError, validateRequiredFields, validateArrayFields, skuValidator, lengthValidator, numberValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
 
 interface ComboProduct {
   id: number
@@ -114,7 +115,8 @@ export default function ComboProductsPage() {
   const [pageSize] = useState(5)
   const [total, setTotal] = useState(0)
   const [searchTerm, setSearchTerm] = useState('')
-  
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
+
   const { toast } = useToast()
 
   const fetchComboProducts = async (page = 1, search = '', warehouseId = '') => {
@@ -138,10 +140,11 @@ export default function ComboProductsPage() {
       setComboProducts(data.items)
       setTotal(data.total)
       setCurrentPage(page)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取组合商品列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -151,10 +154,11 @@ export default function ComboProductsPage() {
     try {
       const response = await api.get('/api/v1/warehouses/')
       setWarehouses(response.data)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
-        title: "错误", 
-        description: "获取仓库列表失败",
+        title: "错误",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -210,10 +214,11 @@ export default function ComboProductsPage() {
       const data = response.data
       const items = data.items || data
       setPackagingProducts(Array.isArray(items) ? items : [])
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取包材列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -248,9 +253,12 @@ export default function ComboProductsPage() {
   }, [])
 
   const handleOpenDialog = (product?: ComboProduct) => {
+    // 清空所有验证错误
+    setValidationErrors([])
+
     if (product) {
       setEditingProduct(product)
-      
+
       // 预先添加已选择的基础商品到可搜索列表中
       const selectedBaseProducts: Product[] = product.combo_items
         .filter(item => item.base_product_name && item.base_product_sku)
@@ -260,14 +268,14 @@ export default function ComboProductsPage() {
           sku: item.base_product_sku!,
           sale_type: '商品'
         }))
-      
+
       // 先同步更新基础商品列表
       setBaseProducts(prev => {
         const newProducts = selectedBaseProducts.filter(
           newProduct => !prev.some(existing => existing.id === newProduct.id)
         )
         const updatedProducts = [...prev, ...newProducts]
-        
+
         // 立即设置表单数据，此时使用更新后的商品列表
         setTimeout(() => {
           setFormData({
@@ -288,7 +296,7 @@ export default function ComboProductsPage() {
             })) || []
           })
         }, 0)
-        
+
         return updatedProducts
       })
     } else {
@@ -307,75 +315,64 @@ export default function ComboProductsPage() {
   const handleCloseDialog = () => {
     setIsDialogOpen(false)
     setEditingProduct(null)
+    setValidationErrors([])
   }
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
 
-    if (!formData.name || !formData.sku || !formData.warehouse_id) {
-      toast({
-        title: "错误",
-        description: "请填写所有必填字段",
-        variant: "destructive",
-      })
-      return
-    }
+    // 清除之前的验证错误
+    setValidationErrors([])
 
-    // 验证组合商品包材配置
+    // 验证基本必填字段
+    const basicFieldsErrors = validateRequiredFields(formData, [
+      { field: 'name', label: '组合商品名称', validator: lengthValidator(1, 100) },
+      { field: 'sku', label: '组合商品SKU', validator: skuValidator },
+      { field: 'warehouse_id', label: '所属仓库' }
+    ])
+
+    // 验证包材配置
     if (!formData.packaging_relations || formData.packaging_relations.length === 0) {
-      toast({
-        title: "错误",
-        description: "请配置组合商品的包材",
-        variant: "destructive",
+      basicFieldsErrors.push({
+        field: 'packaging_relations',
+        message: '请配置组合商品的包材'
       })
-      return
-    }
-
-    // 验证组合商品包材配置的完整性
-    for (const packaging of formData.packaging_relations) {
-      if (!packaging.packaging_id || packaging.quantity <= 0) {
-        toast({
-          title: "错误",
-          description: "组合商品的包材配置不完整，请检查包材选择和数量",
-          variant: "destructive",
-        })
-        return
-      }
+    } else {
+      formData.packaging_relations.forEach((packaging, index) => {
+        if (!packaging.packaging_id || packaging.quantity <= 0) {
+          basicFieldsErrors.push({
+            field: `packaging_relations[${index}]`,
+            message: `包材配置 ${index + 1} 不完整，请检查包材选择和数量`
+          })
+        }
+      })
     }
 
     // 验证组合明细
-    if (formData.combo_items.length === 0) {
+    const comboItemsErrors = validateArrayFields(formData.combo_items, '基础商品', (item, index) => {
+      const errors: ValidationError[] = []
+
+      if (!item.base_product_id) {
+        errors.push({ field: 'base_product_id', message: `请选择基础商品` })
+      }
+
+      if (!numberValidator(1)(item.quantity)) {
+        errors.push({ field: 'quantity', message: `数量必须大于0` })
+      }
+
+      return errors
+    })
+
+    const allErrors = [...basicFieldsErrors, ...comboItemsErrors]
+
+    if (hasErrors(allErrors)) {
+      setValidationErrors(allErrors)
       toast({
-        title: "错误",
-        description: "至少需要一个基础商品",
+        title: "表单验证失败",
+        description: formatErrorsForToast(allErrors),
         variant: "destructive",
       })
       return
-    }
-
-    for (const item of formData.combo_items) {
-      if (!item.base_product_id || item.quantity <= 0) {
-        toast({
-          title: "错误",
-          description: "请为所有组合明细选择商品并输入有效数量",
-          variant: "destructive",
-        })
-        return
-      }
-
-      // 验证基础商品的包材配置
-      if (item.packaging_relations && item.packaging_relations.length > 0) {
-        for (const packaging of item.packaging_relations) {
-          if (!packaging.packaging_id || packaging.quantity <= 0) {
-            toast({
-              title: "错误",
-              description: "基础商品的包材配置不完整，请检查包材选择和数量",
-              variant: "destructive",
-            })
-            return
-          }
-        }
-      }
     }
 
     try {
@@ -413,10 +410,18 @@ export default function ComboProductsPage() {
     } catch (error: any) {
       console.error('组合商品提交错误:', error)
       console.error('错误详情:', error.response?.data)
-      
+
+      const apiError = handleApiError(error)
+
+      // 尝试将API错误映射到具体字段
+      const fieldError = apiErrorToFieldError(apiError)
+      if (fieldError) {
+        setValidationErrors([fieldError])
+      }
+
       toast({
         title: "错误",
-        description: error.response?.data?.detail || error.message || "操作失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -433,9 +438,10 @@ export default function ComboProductsPage() {
       })
       await fetchComboProducts(currentPage, searchTerm, '')
     } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: error.response?.data?.detail || "删除失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -550,9 +556,16 @@ export default function ComboProductsPage() {
                     <Input
                       id="name"
                       value={formData.name}
-                      onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                      onChange={(e) => {
+                        setFormData(prev => ({ ...prev, name: e.target.value }))
+                        setValidationErrors(prev => prev.filter(error => error.field !== 'name'))
+                      }}
                       placeholder="输入组合商品名称"
+                      className={validationErrors.some(e => e.field === 'name') ? 'border-red-500' : ''}
                     />
+                    {validationErrors.filter(e => e.field === 'name').map((error, index) => (
+                      <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                    ))}
                   </div>
                   
                   <div className="space-y-2">
@@ -562,20 +575,30 @@ export default function ComboProductsPage() {
                     <Input
                       id="sku"
                       value={formData.sku}
-                      onChange={(e) => setFormData(prev => ({ ...prev, sku: e.target.value }))}
-                      placeholder="输入组合商品SKU"
+                      onChange={(e) => {
+                        setFormData(prev => ({ ...prev, sku: e.target.value }))
+                        setValidationErrors(prev => prev.filter(error => error.field !== 'sku'))
+                      }}
+                      placeholder="输入组合商品SKU（字母、数字、连字符）"
+                      className={validationErrors.some(e => e.field === 'sku') ? 'border-red-500' : ''}
                     />
+                    {validationErrors.filter(e => e.field === 'sku').map((error, index) => (
+                      <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                    ))}
                   </div>
 
                   <div className="space-y-2">
                     <Label htmlFor="warehouse_id" className="text-sm font-medium">
                       所属仓库*
                     </Label>
-                    <Select 
-                      value={formData.warehouse_id?.toString() || ''} 
-                      onValueChange={(value) => setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))}
+                    <Select
+                      value={formData.warehouse_id?.toString() || ''}
+                      onValueChange={(value) => {
+                        setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))
+                        setValidationErrors(prev => prev.filter(error => error.field !== 'warehouse_id'))
+                      }}
                     >
-                      <SelectTrigger>
+                      <SelectTrigger className={validationErrors.some(e => e.field === 'warehouse_id') ? 'border-red-500' : ''}>
                         <SelectValue placeholder="选择仓库" />
                       </SelectTrigger>
                       <SelectContent>
@@ -586,6 +609,9 @@ export default function ComboProductsPage() {
                         ))}
                       </SelectContent>
                     </Select>
+                    {validationErrors.filter(e => e.field === 'warehouse_id').map((error, index) => (
+                      <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                    ))}
                   </div>
 
                   <div className="space-y-2 col-span-4">

@@ -34,6 +34,7 @@ import { Plus, Pencil, Trash2, Package, Search, ChevronLeft, ChevronRight } from
 import { api } from '@/lib/api'
 import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector'
 import { PackagingRelation, ProductPackagingRelation } from '@/types'
+import { handleApiError, validateRequiredFields, skuValidator, lengthValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
 
 interface Product {
   id: number
@@ -94,6 +95,7 @@ export default function ProductsPage() {
   })
   const [selectedFile, setSelectedFile] = useState<File | null>(null)
   const [isUploading, setIsUploading] = useState(false)
+  const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
   
   // 分页和搜索状态
   const [currentPage, setCurrentPage] = useState(1)
@@ -128,10 +130,11 @@ export default function ProductsPage() {
       setProducts(data.items)
       setTotal(data.total)
       setCurrentPage(page)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取商品列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -141,10 +144,11 @@ export default function ProductsPage() {
     try {
       const response = await api.get('/api/v1/warehouses/')
       setWarehouses(response.data)
-    } catch (error) {
+    } catch (error: any) {
+      const apiError = handleApiError(error)
       toast({
         title: "错误",
-        description: "获取仓库列表失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -174,6 +178,9 @@ export default function ProductsPage() {
   }, [])
 
   const handleOpenDialog = (product?: Product) => {
+    // 清空所有验证错误
+    setValidationErrors([])
+
     if (product) {
       setEditingProduct(product)
       setFormData({
@@ -205,6 +212,7 @@ export default function ProductsPage() {
     setIsDialogOpen(false)
     setEditingProduct(null)
     setSelectedFile(null)
+    setValidationErrors([])
     setFormData({
       name: '',
       sku: '',
@@ -241,11 +249,23 @@ export default function ProductsPage() {
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
-    
-    if (!formData.name || !formData.sku || !formData.sale_type || !formData.warehouse_id) {
+
+    // 清除之前的验证错误
+    setValidationErrors([])
+
+    // 验证必填字段
+    const requiredFieldsErrors = validateRequiredFields(formData, [
+      { field: 'name', label: '商品名称', validator: lengthValidator(1, 100) },
+      { field: 'sku', label: '商品SKU', validator: skuValidator },
+      { field: 'sale_type', label: '销售方式' },
+      { field: 'warehouse_id', label: '所属仓库' }
+    ])
+
+    if (hasErrors(requiredFieldsErrors)) {
+      setValidationErrors(requiredFieldsErrors)
       toast({
-        title: "错误",
-        description: "请填写所有必填字段",
+        title: "表单验证失败",
+        description: formatErrorsForToast(requiredFieldsErrors),
         variant: "destructive",
       })
       return
@@ -292,9 +312,17 @@ export default function ProductsPage() {
         fetchPackagingProducts()
       }
     } catch (error: any) {
+      const apiError = handleApiError(error)
+
+      // 尝试将API错误映射到具体字段
+      const fieldError = apiErrorToFieldError(apiError)
+      if (fieldError) {
+        setValidationErrors([fieldError])
+      }
+
       toast({
         title: "错误",
-        description: error.response?.data?.detail || "操作失败",
+        description: apiError.message,
         variant: "destructive",
       })
     }
@@ -339,9 +367,10 @@ export default function ProductsPage() {
         fetchProducts(currentPage, searchTerm, '', selectedSaleType)
         fetchPackagingProducts()
       } catch (error: any) {
+        const apiError = handleApiError(error)
         toast({
           title: "错误",
-          description: error.response?.data?.detail || "删除失败",
+          description: apiError.message,
           variant: "destructive",
         })
       }
@@ -407,10 +436,18 @@ export default function ProductsPage() {
                 <Input
                   id="name"
                   value={formData.name}
-                  onChange={(e) => setFormData(prev => ({ ...prev, name: e.target.value }))}
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, name: e.target.value }))
+                    // 清除该字段的验证错误
+                    setValidationErrors(prev => prev.filter(error => error.field !== 'name'))
+                  }}
                   placeholder="请输入商品名称"
+                  className={validationErrors.some(e => e.field === 'name') ? 'border-red-500' : ''}
                   required
                 />
+                {validationErrors.filter(e => e.field === 'name').map((error, index) => (
+                  <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                ))}
               </div>
               
               <div>
@@ -418,19 +455,31 @@ export default function ProductsPage() {
                 <Input
                   id="sku"
                   value={formData.sku}
-                  onChange={(e) => setFormData(prev => ({ ...prev, sku: e.target.value }))}
-                  placeholder="请输入商品SKU"
+                  onChange={(e) => {
+                    setFormData(prev => ({ ...prev, sku: e.target.value }))
+                    // 清除该字段的验证错误
+                    setValidationErrors(prev => prev.filter(error => error.field !== 'sku'))
+                  }}
+                  placeholder="请输入商品SKU（字母、数字、连字符）"
+                  className={validationErrors.some(e => e.field === 'sku') ? 'border-red-500' : ''}
                   required
                 />
+                {validationErrors.filter(e => e.field === 'sku').map((error, index) => (
+                  <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                ))}
               </div>
               
               <div>
                 <Label htmlFor="sale_type">销售方式 *</Label>
                 <Select
                   value={formData.sale_type}
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, sale_type: value, packaging_id: null }))}
+                  onValueChange={(value) => {
+                    setFormData(prev => ({ ...prev, sale_type: value, packaging_id: null }))
+                    // 清除该字段的验证错误
+                    setValidationErrors(prev => prev.filter(error => error.field !== 'sale_type'))
+                  }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className={validationErrors.some(e => e.field === 'sale_type') ? 'border-red-500' : ''}>
                     <SelectValue placeholder="请选择销售方式" />
                   </SelectTrigger>
                   <SelectContent>
@@ -441,15 +490,22 @@ export default function ProductsPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                {validationErrors.filter(e => e.field === 'sale_type').map((error, index) => (
+                  <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                ))}
               </div>
               
               <div>
                 <Label htmlFor="warehouse_id">所属仓库 *</Label>
                 <Select
                   value={formData.warehouse_id?.toString() || ''}
-                  onValueChange={(value) => setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))}
+                  onValueChange={(value) => {
+                    setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))
+                    // 清除该字段的验证错误
+                    setValidationErrors(prev => prev.filter(error => error.field !== 'warehouse_id'))
+                  }}
                 >
-                  <SelectTrigger>
+                  <SelectTrigger className={validationErrors.some(e => e.field === 'warehouse_id') ? 'border-red-500' : ''}>
                     <SelectValue placeholder="请选择仓库" />
                   </SelectTrigger>
                   <SelectContent>
@@ -460,6 +516,9 @@ export default function ProductsPage() {
                     ))}
                   </SelectContent>
                 </Select>
+                {validationErrors.filter(e => e.field === 'warehouse_id').map((error, index) => (
+                  <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
+                ))}
               </div>
               
               {formData.sale_type === '商品' && (
