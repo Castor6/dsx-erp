@@ -11,12 +11,10 @@ class ComboProduct(Base):
     id = Column(Integer, primary_key=True, index=True)
     name = Column(String(200), nullable=False)  # 组合商品名称
     sku = Column(String(100), unique=True, index=True, nullable=False)  # 组合商品SKU
-    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now())
-    
+
     # 关系
-    warehouse = relationship("Warehouse")
     combo_items = relationship("ComboProductItem", back_populates="combo_product", cascade="all, delete-orphan")
     # 库存记录
     inventory_records = relationship("ComboInventoryRecord", back_populates="combo_product", cascade="all, delete-orphan")

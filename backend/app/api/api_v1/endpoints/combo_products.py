@@ -33,10 +33,10 @@ async def get_combo_products(
     """获取组合商品列表，支持模糊查询和分页"""
     # 构建查询条件
     query = select(ComboProduct).options(
-        selectinload(ComboProduct.warehouse),
         selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
         selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
-        selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+        selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging),
+        selectinload(ComboProduct.inventory_records).selectinload(ComboInventoryRecord.warehouse)
     )
     
     # 搜索条件：支持商品名称和SKU模糊查询
@@ -49,9 +49,9 @@ async def get_combo_products(
             )
         )
     
-    # 仓库筛选
+    # 仓库筛选 - 通过库存记录关联
     if warehouse_id:
-        query = query.where(ComboProduct.warehouse_id == warehouse_id)
+        query = query.join(ComboInventoryRecord).where(ComboInventoryRecord.warehouse_id == warehouse_id)
     
     # 获取总数
     count_query = select(func.count(ComboProduct.id))
@@ -64,7 +64,7 @@ async def get_combo_products(
             )
         )
     if warehouse_id:
-        count_query = count_query.where(ComboProduct.warehouse_id == warehouse_id)
+        count_query = count_query.join(ComboInventoryRecord).where(ComboInventoryRecord.warehouse_id == warehouse_id)
     
     total_result = await db.execute(count_query)
     total = total_result.scalar()
@@ -77,12 +77,21 @@ async def get_combo_products(
     # 转换数据，添加关联信息
     result_list = []
     for combo in combo_products:
+        # 构建仓库信息
+        warehouses = []
+        for inventory_record in combo.inventory_records:
+            warehouses.append({
+                "warehouse_id": inventory_record.warehouse_id,
+                "warehouse_name": inventory_record.warehouse.name,
+                "finished": inventory_record.finished,
+                "shipped": inventory_record.shipped
+            })
+
         combo_dict = {
             "id": combo.id,
             "name": combo.name,
             "sku": combo.sku,
-            "warehouse_id": combo.warehouse_id,
-            "warehouse_name": combo.warehouse.name if combo.warehouse else None,
+            "warehouses": warehouses,
             "created_at": combo.created_at,
             "updated_at": combo.updated_at,
             "combo_items": [
@@ -151,12 +160,19 @@ async def create_combo_product(
         )
     
     # 验证仓库是否存在
-    warehouse_result = await db.execute(select(Warehouse).where(Warehouse.id == combo_product_data.warehouse_id))
-    if not warehouse_result.scalar_one_or_none():
+    if not combo_product_data.warehouse_ids:
         raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="仓库不存在"
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="必须选择至少一个仓库"
         )
+
+    for warehouse_id in combo_product_data.warehouse_ids:
+        warehouse_result = await db.execute(select(Warehouse).where(Warehouse.id == warehouse_id))
+        if not warehouse_result.scalar_one_or_none():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"仓库ID {warehouse_id} 不存在"
+            )
     
     # 验证包材关系
     if not combo_product_data.packaging_relations:
@@ -192,7 +208,7 @@ async def create_combo_product(
     
     try:
         # 创建组合商品
-        combo_product_dict = combo_product_data.model_dump(exclude={"combo_items", "packaging_relations"})
+        combo_product_dict = combo_product_data.model_dump(exclude={"combo_items", "packaging_relations", "warehouse_ids"})
         db_combo_product = ComboProduct(**combo_product_dict)
         db.add(db_combo_product)
         await db.flush()  # 刷新以获取ID
@@ -255,12 +271,15 @@ async def create_combo_product(
                 )
                 db.add(db_relation)
         
-        # 创建库存记录
-        combo_inventory = ComboInventoryRecord(
-            combo_product_id=db_combo_product.id,
-            warehouse_id=combo_product_data.warehouse_id
-        )
-        db.add(combo_inventory)
+        # 为每个选择的仓库创建库存记录
+        for warehouse_id in combo_product_data.warehouse_ids:
+            combo_inventory = ComboInventoryRecord(
+                combo_product_id=db_combo_product.id,
+                warehouse_id=warehouse_id,
+                finished=0,
+                shipped=0
+            )
+            db.add(combo_inventory)
         
         await db.commit()
         await db.refresh(db_combo_product)
@@ -269,22 +288,31 @@ async def create_combo_product(
         result = await db.execute(
             select(ComboProduct)
             .options(
-                selectinload(ComboProduct.warehouse),
                 selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
                 selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
-                selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+                selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging),
+                selectinload(ComboProduct.inventory_records).selectinload(ComboInventoryRecord.warehouse)
             )
             .where(ComboProduct.id == db_combo_product.id)
         )
         combo_product = result.scalar_one()
-        
+
+        # 构建仓库信息
+        warehouses = []
+        for inventory_record in combo_product.inventory_records:
+            warehouses.append({
+                "warehouse_id": inventory_record.warehouse_id,
+                "warehouse_name": inventory_record.warehouse.name,
+                "finished": inventory_record.finished,
+                "shipped": inventory_record.shipped
+            })
+
         # 构建返回数据
         return {
             "id": combo_product.id,
             "name": combo_product.name,
             "sku": combo_product.sku,
-            "warehouse_id": combo_product.warehouse_id,
-            "warehouse_name": combo_product.warehouse.name,
+            "warehouses": warehouses,
             "created_at": combo_product.created_at,
             "updated_at": combo_product.updated_at,
             "combo_items": [
@@ -343,10 +371,10 @@ async def get_combo_product(
     result = await db.execute(
         select(ComboProduct)
         .options(
-            selectinload(ComboProduct.warehouse),
             selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
             selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
-            selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+            selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging),
+            selectinload(ComboProduct.inventory_records).selectinload(ComboInventoryRecord.warehouse)
         )
         .where(ComboProduct.id == combo_product_id)
     )
@@ -358,13 +386,22 @@ async def get_combo_product(
             detail="组合商品不存在"
         )
     
+    # 构建仓库信息
+    warehouses = []
+    for inventory_record in combo_product.inventory_records:
+        warehouses.append({
+            "warehouse_id": inventory_record.warehouse_id,
+            "warehouse_name": inventory_record.warehouse.name,
+            "finished": inventory_record.finished,
+            "shipped": inventory_record.shipped
+        })
+
     # 构建返回数据
     return {
         "id": combo_product.id,
         "name": combo_product.name,
         "sku": combo_product.sku,
-        "warehouse_id": combo_product.warehouse_id,
-        "warehouse_name": combo_product.warehouse.name,
+        "warehouses": warehouses,
         "created_at": combo_product.created_at,
         "updated_at": combo_product.updated_at,
         "combo_items": [
@@ -430,9 +467,66 @@ async def update_combo_product(
     
     try:
         # 更新基本信息
-        update_data = combo_product_data.model_dump(exclude_unset=True, exclude={"combo_items", "packaging_relations"})
+        update_data = combo_product_data.model_dump(exclude_unset=True, exclude={"combo_items", "packaging_relations", "warehouse_ids"})
         for field, value in update_data.items():
             setattr(db_combo_product, field, value)
+
+        # 处理仓库变更
+        if combo_product_data.warehouse_ids is not None:
+            # 获取当前的库存记录
+            current_inventories = await db.execute(
+                select(ComboInventoryRecord).where(
+                    ComboInventoryRecord.combo_product_id == combo_product_id
+                )
+            )
+            current_inventory_dict = {
+                inv.warehouse_id: inv for inv in current_inventories.scalars().all()
+            }
+
+            current_warehouse_ids = set(current_inventory_dict.keys())
+            new_warehouse_ids = set(combo_product_data.warehouse_ids)
+
+            # 要移除的仓库
+            warehouses_to_remove = current_warehouse_ids - new_warehouse_ids
+            # 要添加的仓库
+            warehouses_to_add = new_warehouse_ids - current_warehouse_ids
+
+            # 检查要移除的仓库是否有库存
+            for warehouse_id in warehouses_to_remove:
+                inventory = current_inventory_dict[warehouse_id]
+                if inventory.finished > 0 or inventory.shipped > 0:
+                    warehouse_name_result = await db.execute(
+                        select(Warehouse.name).where(Warehouse.id == warehouse_id)
+                    )
+                    warehouse_name = warehouse_name_result.scalar_one_or_none()
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail=f"仓库 '{warehouse_name}' 还有库存（成品：{inventory.finished}，出库：{inventory.shipped}），无法移除"
+                    )
+
+            # 删除要移除的仓库库存记录（已确认无库存）
+            for warehouse_id in warehouses_to_remove:
+                inventory = current_inventory_dict[warehouse_id]
+                await db.delete(inventory)
+
+            # 验证要添加的仓库是否存在
+            for warehouse_id in warehouses_to_add:
+                warehouse_result = await db.execute(select(Warehouse).where(Warehouse.id == warehouse_id))
+                if not warehouse_result.scalar_one_or_none():
+                    raise HTTPException(
+                        status_code=status.HTTP_404_NOT_FOUND,
+                        detail=f"仓库ID {warehouse_id} 不存在"
+                    )
+
+            # 为新增的仓库创建库存记录
+            for warehouse_id in warehouses_to_add:
+                new_inventory = ComboInventoryRecord(
+                    combo_product_id=combo_product_id,
+                    warehouse_id=warehouse_id,
+                    finished=0,
+                    shipped=0
+                )
+                db.add(new_inventory)
         
         # 如果需要更新组合明细
         if combo_product_data.combo_items is not None:
@@ -527,22 +621,31 @@ async def update_combo_product(
         result = await db.execute(
             select(ComboProduct)
             .options(
-                selectinload(ComboProduct.warehouse),
                 selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
                 selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
-                selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+                selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging),
+                selectinload(ComboProduct.inventory_records).selectinload(ComboInventoryRecord.warehouse)
             )
             .where(ComboProduct.id == combo_product_id)
         )
         combo_product = result.scalar_one()
-        
+
+        # 构建仓库信息
+        warehouses = []
+        for inventory_record in combo_product.inventory_records:
+            warehouses.append({
+                "warehouse_id": inventory_record.warehouse_id,
+                "warehouse_name": inventory_record.warehouse.name,
+                "finished": inventory_record.finished,
+                "shipped": inventory_record.shipped
+            })
+
         # 构建返回数据
         return {
             "id": combo_product.id,
             "name": combo_product.name,
             "sku": combo_product.sku,
-            "warehouse_id": combo_product.warehouse_id,
-            "warehouse_name": combo_product.warehouse.name,
+            "warehouses": warehouses,
             "created_at": combo_product.created_at,
             "updated_at": combo_product.updated_at,
             "combo_items": [
@@ -707,7 +810,7 @@ async def assemble_combo_product(
     
     # 计算可组合数量
     available_to_assemble = await calculate_available_to_assemble(
-        combo_product, combo_product.warehouse_id, db
+        combo_product, request.warehouse_id, db
     )
     
     if request.quantity > available_to_assemble:
@@ -726,7 +829,7 @@ async def assemble_combo_product(
                 select(InventoryRecord).where(
                     and_(
                         InventoryRecord.product_id == item.base_product_id,
-                        InventoryRecord.warehouse_id == combo_product.warehouse_id
+                        InventoryRecord.warehouse_id == request.warehouse_id
                     )
                 )
             )
@@ -751,7 +854,7 @@ async def assemble_combo_product(
                         select(InventoryRecord).where(
                             and_(
                                 InventoryRecord.product_id == packaging_relation.packaging_id,
-                                InventoryRecord.warehouse_id == combo_product.warehouse_id
+                                InventoryRecord.warehouse_id == request.warehouse_id
                             )
                         )
                     )
@@ -777,7 +880,7 @@ async def assemble_combo_product(
                     select(InventoryRecord).where(
                         and_(
                             InventoryRecord.product_id == packaging_relation.packaging_id,
-                            InventoryRecord.warehouse_id == combo_product.warehouse_id
+                            InventoryRecord.warehouse_id == request.warehouse_id
                         )
                     )
                 )
@@ -797,7 +900,7 @@ async def assemble_combo_product(
             select(ComboInventoryRecord).where(
                 and_(
                     ComboInventoryRecord.combo_product_id == request.combo_product_id,
-                    ComboInventoryRecord.warehouse_id == combo_product.warehouse_id
+                    ComboInventoryRecord.warehouse_id == request.warehouse_id
                 )
             )
         )
@@ -806,7 +909,9 @@ async def assemble_combo_product(
         if not combo_inventory:
             combo_inventory = ComboInventoryRecord(
                 combo_product_id=request.combo_product_id,
-                warehouse_id=combo_product.warehouse_id
+                warehouse_id=request.warehouse_id,
+                finished=0,
+                shipped=0
             )
             db.add(combo_inventory)
         
@@ -815,7 +920,7 @@ async def assemble_combo_product(
         # 记录库存变动
         transaction = ComboInventoryTransaction(
             combo_product_id=request.combo_product_id,
-            warehouse_id=combo_product.warehouse_id,
+            warehouse_id=request.warehouse_id,
             transaction_type="组装",
             quantity=request.quantity,
             notes=request.notes
@@ -849,7 +954,12 @@ async def ship_combo_product(
     combo_inventory_result = await db.execute(
         select(ComboInventoryRecord)
         .options(selectinload(ComboInventoryRecord.combo_product))
-        .where(ComboInventoryRecord.combo_product_id == request.combo_product_id)
+        .where(
+            and_(
+                ComboInventoryRecord.combo_product_id == request.combo_product_id,
+                ComboInventoryRecord.warehouse_id == request.warehouse_id
+            )
+        )
     )
     combo_inventory = combo_inventory_result.scalar_one_or_none()
     
@@ -873,7 +983,7 @@ async def ship_combo_product(
         # 记录库存变动
         transaction = ComboInventoryTransaction(
             combo_product_id=request.combo_product_id,
-            warehouse_id=combo_inventory.warehouse_id,
+            warehouse_id=request.warehouse_id,
             transaction_type="出库",
             quantity=request.quantity,
             notes=request.notes

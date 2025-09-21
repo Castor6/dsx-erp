@@ -102,6 +102,10 @@ interface InventorySummary {
   total_semi_finished: number
   total_finished: number
   total_shipped: number
+  // 组合商品统计
+  total_combo_products: number
+  total_combo_finished: number
+  total_combo_shipped: number
 }
 
 interface WarehouseData {
@@ -273,28 +277,53 @@ export default function InventoryPage() {
     }
   }
 
-  const fetchComboProductDetails = async (comboProductId: number) => {
+  const fetchComboProductDetails = async (comboProductId: number, warehouseId?: number) => {
     try {
       const response = await api.get(`/api/v1/combo-products/${comboProductId}`)
       const comboProduct = response.data
-      
+
       // 确保获取到最新的基础商品库存数据
       await fetchBaseInventory(baseInventory.page)
-      
-      const warehouse = warehouses.find(w => w.id === comboProduct.warehouse_id)
-      
+
+      // 确定要使用的仓库ID：优先使用传入的仓库ID，其次使用当前选中的仓库，最后使用组合商品的第一个仓库
+      let targetWarehouseId = warehouseId || selectedWarehouse
+      let warehouseName = '未知仓库'
+
+      if (!targetWarehouseId && comboProduct.warehouses && comboProduct.warehouses.length > 0) {
+        targetWarehouseId = comboProduct.warehouses[0].warehouse_id
+        warehouseName = comboProduct.warehouses[0].warehouse_name
+      } else if (targetWarehouseId) {
+        // 优先从组合商品的仓库列表中查找
+        const warehouseInfo = comboProduct.warehouses?.find(w => w.warehouse_id === targetWarehouseId)
+        if (warehouseInfo) {
+          warehouseName = warehouseInfo.warehouse_name
+        } else {
+          const warehouse = warehouses.find(w => w.id === targetWarehouseId)
+          warehouseName = warehouse?.name || '未知仓库'
+        }
+      }
+
+      if (!targetWarehouseId) {
+        toast({
+          title: "错误",
+          description: "无法确定仓库信息，请先选择仓库",
+          variant: "destructive",
+        })
+        return
+      }
+
       const details: ComboProductDetails = {
         id: comboProduct.id,
         name: comboProduct.name,
         sku: comboProduct.sku,
-        warehouse_name: warehouse?.name || '未知仓库',
+        warehouse_name: warehouseName,
         combo_items: comboProduct.combo_items
       }
-      
+
       // 获取组合商品的包材库存信息
-      const packagingResponse = await api.get(`/api/v1/inventory/combo-product/${comboProductId}/packaging?warehouse_id=${comboProduct.warehouse_id}`)
+      const packagingResponse = await api.get(`/api/v1/inventory/combo-product/${comboProductId}/packaging?warehouse_id=${targetWarehouseId}`)
       setComboPackagingDetails(packagingResponse.data)
-      
+
       setSelectedComboDetails(details)
       setIsComboDetailsDialogOpen(true)
     } catch (error) {
@@ -338,11 +367,12 @@ export default function InventoryPage() {
     loadInitialData()
   }, [])
 
-  // 监听仓库变化
+  // 监听仓库变化 - 同时刷新两个标签页的数据
   useEffect(() => {
-    if (activeTab === 'base') {
+    // 避免在初始化时重复加载（初始化时 warehouses 还是空数组）
+    if (warehouses.length > 0) {
+      // 同时刷新基础商品和组合商品库存数据
       fetchBaseInventory(1)
-    } else {
       fetchComboInventory(1)
     }
   }, [selectedWarehouse])
@@ -416,6 +446,7 @@ export default function InventoryPage() {
           endpoint = '/api/v1/combo-products/assemble'
           payload = {
             combo_product_id: actionForm.combo_product_id,
+            warehouse_id: actionForm.warehouse_id,
             quantity: actionForm.quantity,
             notes: actionForm.notes || ''
           }
@@ -425,6 +456,7 @@ export default function InventoryPage() {
           endpoint = '/api/v1/combo-products/ship'
           payload = {
             combo_product_id: actionForm.combo_product_id,
+            warehouse_id: actionForm.warehouse_id,
             quantity: actionForm.quantity,
             notes: actionForm.notes || ''
           }
@@ -783,7 +815,7 @@ export default function InventoryPage() {
                     <Button
                       variant="ghost"
                       size="sm"
-                      onClick={() => fetchComboProductDetails(record.combo_product_id)}
+                      onClick={() => fetchComboProductDetails(record.combo_product_id, record.warehouse_id)}
                       className="text-blue-600 hover:text-blue-800 p-1 h-auto"
                     >
                       查看明细
@@ -908,13 +940,18 @@ export default function InventoryPage() {
             </CardHeader>
             <CardContent>
               <div className="space-y-1">
-                <div className="text-2xl font-bold">{summary.total_products}</div>
-                <p className="text-xs text-muted-foreground">商品种类</p>
+                <div className="text-2xl font-bold">{summary.total_products + summary.total_combo_products}</div>
+                <p className="text-xs text-muted-foreground">商品种类总数</p>
                 <div className="grid grid-cols-2 gap-1 text-xs">
                   <div>在途: {summary.total_in_transit}</div>
                   <div>半成品: {summary.total_semi_finished}</div>
-                  <div>成品: {summary.total_finished}</div>
-                  <div>出库: {summary.total_shipped}</div>
+                  <div>成品: {summary.total_finished + summary.total_combo_finished}</div>
+                  <div>出库: {summary.total_shipped + summary.total_combo_shipped}</div>
+                </div>
+                <div className="pt-1 border-t border-gray-100">
+                  <div className="text-xs text-purple-600">
+                    组合商品: {summary.total_combo_products} 种
+                  </div>
                 </div>
               </div>
             </CardContent>
@@ -1326,14 +1363,43 @@ export default function InventoryPage() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {selectedComboDetails.combo_items.map((item) => {
-                      // 查找对应的基础商品库存记录，使用半成品库存数量
+                    {comboPackagingDetails?.base_products_inventory?.map((item) => {
+                      return (
+                        <TableRow key={item.base_product_id}>
+                          <TableCell>
+                            <div className="font-medium">{item.base_product_name}</div>
+                          </TableCell>
+                          <TableCell>
+                            <div className="text-sm text-gray-500">{item.base_product_sku}</div>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className="font-medium">{item.required_quantity}</span>
+                          </TableCell>
+                          <TableCell className="text-right">
+                            <span className={`font-medium ${
+                              item.available_stock === 0 ? 'text-red-600' :
+                              item.available_stock < item.required_quantity ? 'text-orange-600' : 'text-green-600'
+                            }`}>
+                              {item.available_stock}
+                            </span>
+                          </TableCell>
+                          <TableCell>
+                            <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
+                              item.stock_status === '库存充足' ? 'bg-green-100 text-green-800' : 'bg-red-100 text-red-800'
+                            }`}>
+                              {item.stock_status}
+                            </span>
+                          </TableCell>
+                        </TableRow>
+                      )
+                    }) || selectedComboDetails.combo_items.map((item) => {
+                      // 回退逻辑：如果新API没有返回base_products_inventory，使用原来的逻辑
                       const inventoryRecord = baseInventory.items.find(
                         record => record.product_id === item.base_product_id
                       )
                       const availableStock = inventoryRecord?.semi_finished || 0
                       const canFulfill = availableStock >= item.quantity
-                      
+
                       return (
                         <TableRow key={item.id}>
                           <TableCell>
@@ -1356,7 +1422,7 @@ export default function InventoryPage() {
                           <TableCell>
                             <span className={`inline-flex items-center px-2 py-1 rounded-full text-xs font-medium ${
                               !canFulfill ? 'bg-red-100 text-red-800' :
-                              availableStock < item.quantity * 2 ? 'bg-orange-100 text-orange-800' : 
+                              availableStock < item.quantity * 2 ? 'bg-orange-100 text-orange-800' :
                               'bg-green-100 text-green-800'
                             }`}>
                               {!canFulfill ? '库存不足' :

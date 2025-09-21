@@ -136,8 +136,9 @@ async def get_inventory_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_active_user)
 ):
-    """获取各仓库库存汇总"""
-    result = await db.execute(
+    """获取各仓库库存汇总（包含基础商品和组合商品）"""
+    # 基础商品统计
+    base_result = await db.execute(
         select(
             Warehouse.id.label("warehouse_id"),
             Warehouse.name.label("warehouse_name"),
@@ -151,9 +152,26 @@ async def get_inventory_summary(
         .outerjoin(InventoryRecord, Warehouse.id == InventoryRecord.warehouse_id)
         .group_by(Warehouse.id, Warehouse.name)
     )
-    
+
+    # 组合商品统计
+    combo_result = await db.execute(
+        select(
+            Warehouse.id.label("warehouse_id"),
+            func.count(ComboInventoryRecord.combo_product_id).label("total_combo_products"),
+            func.sum(ComboInventoryRecord.finished).label("total_combo_finished"),
+            func.sum(ComboInventoryRecord.shipped).label("total_combo_shipped")
+        )
+        .select_from(Warehouse)
+        .outerjoin(ComboInventoryRecord, Warehouse.id == ComboInventoryRecord.warehouse_id)
+        .group_by(Warehouse.id)
+    )
+
+    # 将组合商品统计转换为字典以便查找
+    combo_stats = {row.warehouse_id: row for row in combo_result}
+
     summaries = []
-    for row in result:
+    for row in base_result:
+        combo_row = combo_stats.get(row.warehouse_id)
         summaries.append(InventorySummary(
             warehouse_id=row.warehouse_id,
             warehouse_name=row.warehouse_name,
@@ -161,9 +179,12 @@ async def get_inventory_summary(
             total_in_transit=row.total_in_transit or 0,
             total_semi_finished=row.total_semi_finished or 0,
             total_finished=row.total_finished or 0,
-            total_shipped=row.total_shipped or 0
+            total_shipped=row.total_shipped or 0,
+            total_combo_products=combo_row.total_combo_products or 0 if combo_row else 0,
+            total_combo_finished=combo_row.total_combo_finished or 0 if combo_row else 0,
+            total_combo_shipped=combo_row.total_combo_shipped or 0 if combo_row else 0
         ))
-    
+
     return summaries
 
 
@@ -737,7 +758,8 @@ async def get_combo_product_packaging_inventory(
     
     result = {
         "combo_product_packaging": [],
-        "base_products_packaging": []
+        "base_products_packaging": [],
+        "base_products_inventory": []  # 新增：基础商品库存信息
     }
     
     # 获取仓库名称映射（避免懒加载）
@@ -766,16 +788,9 @@ async def get_combo_product_packaging_inventory(
                         )
                     )
                 )
-                inventory_records = [inventory_result.scalar_one_or_none()]
-            else:
-                inventory_result = await db.execute(
-                    select(InventoryRecord)
-                    .options(selectinload(InventoryRecord.warehouse))
-                    .where(InventoryRecord.product_id == relation.packaging_id)
-                )
-                inventory_records = inventory_result.scalars().all()
-            
-            for inventory in inventory_records:
+                inventory = inventory_result.scalar_one_or_none()
+
+                # 即使没有库存记录也要显示包材信息
                 if inventory:
                     result["combo_product_packaging"].append({
                         "packaging_id": relation.packaging_id,
@@ -789,14 +804,82 @@ async def get_combo_product_packaging_inventory(
                         "available_stock": inventory.semi_finished,
                         "status": "库存充足" if inventory.semi_finished >= relation.quantity else "库存不足"
                     })
+                else:
+                    # 没有库存记录时显示0库存
+                    result["combo_product_packaging"].append({
+                        "packaging_id": relation.packaging_id,
+                        "packaging_name": relation.packaging.name,
+                        "packaging_sku": relation.packaging.sku,
+                        "required_quantity": relation.quantity,
+                        "warehouse_id": warehouse_id,
+                        "warehouse_name": warehouses_map.get(warehouse_id, "未知仓库"),
+                        "semi_finished": 0,
+                        "total_stock": 0,
+                        "available_stock": 0,
+                        "status": "库存不足"
+                    })
+            else:
+                inventory_result = await db.execute(
+                    select(InventoryRecord)
+                    .options(selectinload(InventoryRecord.warehouse))
+                    .where(InventoryRecord.product_id == relation.packaging_id)
+                )
+                inventory_records = inventory_result.scalars().all()
+
+                # 如果指定了查询所有仓库，需要确保每个仓库都有记录
+                if inventory_records:
+                    for inventory in inventory_records:
+                        result["combo_product_packaging"].append({
+                            "packaging_id": relation.packaging_id,
+                            "packaging_name": relation.packaging.name,
+                            "packaging_sku": relation.packaging.sku,
+                            "required_quantity": relation.quantity,
+                            "warehouse_id": inventory.warehouse_id,
+                            "warehouse_name": warehouses_map.get(inventory.warehouse_id, "未知仓库"),
+                            "semi_finished": inventory.semi_finished,
+                            "total_stock": inventory.semi_finished + inventory.finished,
+                            "available_stock": inventory.semi_finished,
+                            "status": "库存充足" if inventory.semi_finished >= relation.quantity else "库存不足"
+                        })
+                else:
+                    # 没有任何库存记录时，为每个仓库显示0库存
+                    for wh_id, wh_name in warehouses_map.items():
+                        result["combo_product_packaging"].append({
+                            "packaging_id": relation.packaging_id,
+                            "packaging_name": relation.packaging.name,
+                            "packaging_sku": relation.packaging.sku,
+                            "required_quantity": relation.quantity,
+                            "warehouse_id": wh_id,
+                            "warehouse_name": wh_name,
+                            "semi_finished": 0,
+                            "total_stock": 0,
+                            "available_stock": 0,
+                            "status": "库存不足"
+                        })
     
     # 2. 基础商品的包材
     for item in combo_product.combo_items:
+        # 查询基础商品在指定仓库的库存信息
+        base_inventory = None
+        if warehouse_id:
+            base_inventory_result = await db.execute(
+                select(InventoryRecord).where(
+                    and_(
+                        InventoryRecord.product_id == item.base_product_id,
+                        InventoryRecord.warehouse_id == warehouse_id
+                    )
+                )
+            )
+            base_inventory = base_inventory_result.scalar_one_or_none()
+
         item_packaging = {
             "base_product_id": item.base_product_id,
             "base_product_name": item.base_product.name,
             "base_product_sku": item.base_product.sku,
             "required_quantity": item.quantity,
+            "current_stock": base_inventory.semi_finished if base_inventory else 0,
+            "available_stock": base_inventory.semi_finished if base_inventory else 0,
+            "stock_status": "库存充足" if (base_inventory and base_inventory.semi_finished >= item.quantity) else "库存不足",
             "packaging_list": []
         }
         
@@ -814,16 +897,9 @@ async def get_combo_product_packaging_inventory(
                             )
                         )
                     )
-                    inventory_records = [inventory_result.scalar_one_or_none()]
-                else:
-                    inventory_result = await db.execute(
-                        select(InventoryRecord)
-                        .options(selectinload(InventoryRecord.warehouse))
-                        .where(InventoryRecord.product_id == packaging_relation.packaging_id)
-                    )
-                    inventory_records = inventory_result.scalars().all()
-                
-                for inventory in inventory_records:
+                    inventory = inventory_result.scalar_one_or_none()
+
+                    # 即使没有库存记录也要显示包材信息
                     if inventory:
                         item_packaging["packaging_list"].append({
                             "packaging_id": packaging_relation.packaging_id,
@@ -837,9 +913,72 @@ async def get_combo_product_packaging_inventory(
                             "available_stock": inventory.semi_finished,
                             "status": "库存充足" if inventory.semi_finished >= packaging_relation.quantity else "库存不足"
                         })
+                    else:
+                        # 没有库存记录时显示0库存
+                        item_packaging["packaging_list"].append({
+                            "packaging_id": packaging_relation.packaging_id,
+                            "packaging_name": packaging_relation.packaging.name,
+                            "packaging_sku": packaging_relation.packaging.sku,
+                            "required_quantity": packaging_relation.quantity,
+                            "warehouse_id": warehouse_id,
+                            "warehouse_name": warehouses_map.get(warehouse_id, "未知仓库"),
+                            "semi_finished": 0,
+                            "total_stock": 0,
+                            "available_stock": 0,
+                            "status": "库存不足"
+                        })
+                else:
+                    inventory_result = await db.execute(
+                        select(InventoryRecord)
+                        .options(selectinload(InventoryRecord.warehouse))
+                        .where(InventoryRecord.product_id == packaging_relation.packaging_id)
+                    )
+                    inventory_records = inventory_result.scalars().all()
+
+                    # 如果指定了查询所有仓库，需要确保每个仓库都有记录
+                    if inventory_records:
+                        for inventory in inventory_records:
+                            item_packaging["packaging_list"].append({
+                                "packaging_id": packaging_relation.packaging_id,
+                                "packaging_name": packaging_relation.packaging.name,
+                                "packaging_sku": packaging_relation.packaging.sku,
+                                "required_quantity": packaging_relation.quantity,
+                                "warehouse_id": inventory.warehouse_id,
+                                "warehouse_name": warehouses_map.get(inventory.warehouse_id, "未知仓库"),
+                                "semi_finished": inventory.semi_finished,
+                                "total_stock": inventory.semi_finished + inventory.finished,
+                                "available_stock": inventory.semi_finished,
+                                "status": "库存充足" if inventory.semi_finished >= packaging_relation.quantity else "库存不足"
+                            })
+                    else:
+                        # 没有任何库存记录时，为每个仓库显示0库存
+                        for wh_id, wh_name in warehouses_map.items():
+                            item_packaging["packaging_list"].append({
+                                "packaging_id": packaging_relation.packaging_id,
+                                "packaging_name": packaging_relation.packaging.name,
+                                "packaging_sku": packaging_relation.packaging.sku,
+                                "required_quantity": packaging_relation.quantity,
+                                "warehouse_id": wh_id,
+                                "warehouse_name": wh_name,
+                                "semi_finished": 0,
+                                "total_stock": 0,
+                                "available_stock": 0,
+                                "status": "库存不足"
+                            })
         
         result["base_products_packaging"].append(item_packaging)
-    
+
+        # 同时添加基础商品库存信息到单独的列表中
+        result["base_products_inventory"].append({
+            "base_product_id": item.base_product_id,
+            "base_product_name": item.base_product.name,
+            "base_product_sku": item.base_product.sku,
+            "required_quantity": item.quantity,
+            "current_stock": base_inventory.semi_finished if base_inventory else 0,
+            "available_stock": base_inventory.semi_finished if base_inventory else 0,
+            "stock_status": "库存充足" if (base_inventory and base_inventory.semi_finished >= item.quantity) else "库存不足"
+        })
+
     return result
 
 

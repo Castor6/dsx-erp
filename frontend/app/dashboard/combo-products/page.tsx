@@ -37,12 +37,18 @@ import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector
 import { PackagingRelation, ComboItemPackagingRelation, ProductPackagingRelation, ComboProductPackagingRelation } from '@/types'
 import { handleApiError, validateRequiredFields, validateArrayFields, skuValidator, lengthValidator, numberValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
 
+interface WarehouseInfo {
+  warehouse_id: number
+  warehouse_name: string
+  finished: number
+  shipped: number
+}
+
 interface ComboProduct {
   id: number
   name: string
   sku: string
-  warehouse_id: number
-  warehouse_name?: string
+  warehouses: WarehouseInfo[]
   created_at: string
   updated_at?: string
   combo_items: ComboProductItem[]
@@ -75,7 +81,7 @@ interface Warehouse {
 interface ComboProductForm {
   name: string
   sku: string
-  warehouse_id: number | null
+  warehouse_ids: number[]
   combo_items: ComboProductItemForm[]
   packaging_relations: PackagingRelation[]
 }
@@ -105,7 +111,7 @@ export default function ComboProductsPage() {
   const [formData, setFormData] = useState<ComboProductForm>({
     name: '',
     sku: '',
-    warehouse_id: null,
+    warehouse_ids: [],
     combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
     packaging_relations: []
   })
@@ -281,7 +287,7 @@ export default function ComboProductsPage() {
           setFormData({
             name: product.name,
             sku: product.sku,
-            warehouse_id: product.warehouse_id,
+            warehouse_ids: product.warehouses.map(w => w.warehouse_id),
             combo_items: product.combo_items.map(item => ({
               base_product_id: item.base_product_id,
               quantity: item.quantity,
@@ -304,7 +310,7 @@ export default function ComboProductsPage() {
       setFormData({
         name: '',
         sku: '',
-        warehouse_id: null,
+        warehouse_ids: [],
         combo_items: [{ base_product_id: null, quantity: 1, packaging_relations: [] }],
         packaging_relations: []
       })
@@ -327,9 +333,16 @@ export default function ComboProductsPage() {
     // 验证基本必填字段
     const basicFieldsErrors = validateRequiredFields(formData, [
       { field: 'name', label: '组合商品名称', validator: lengthValidator(1, 100) },
-      { field: 'sku', label: '组合商品SKU', validator: skuValidator },
-      { field: 'warehouse_id', label: '所属仓库' }
+      { field: 'sku', label: '组合商品SKU', validator: skuValidator }
     ])
+
+    // 验证仓库选择
+    if (!formData.warehouse_ids || formData.warehouse_ids.length === 0) {
+      basicFieldsErrors.push({
+        field: 'warehouse_ids',
+        message: '请选择至少一个仓库'
+      })
+    }
 
     // 验证包材配置
     if (!formData.packaging_relations || formData.packaging_relations.length === 0) {
@@ -376,11 +389,11 @@ export default function ComboProductsPage() {
     }
 
     try {
-      // 构建提交数据，移除旧的packaging_id字段
+      // 构建提交数据
       const submitData = {
         name: formData.name,
         sku: formData.sku,
-        warehouse_id: formData.warehouse_id,
+        warehouse_ids: formData.warehouse_ids,
         combo_items: formData.combo_items.map(item => ({
           base_product_id: item.base_product_id,
           quantity: item.quantity,
@@ -588,28 +601,74 @@ export default function ComboProductsPage() {
                   </div>
 
                   <div className="space-y-2">
-                    <Label htmlFor="warehouse_id" className="text-sm font-medium">
+                    <Label htmlFor="warehouse_ids" className="text-sm font-medium">
                       所属仓库*
                     </Label>
-                    <Select
-                      value={formData.warehouse_id?.toString() || ''}
-                      onValueChange={(value) => {
-                        setFormData(prev => ({ ...prev, warehouse_id: parseInt(value) }))
-                        setValidationErrors(prev => prev.filter(error => error.field !== 'warehouse_id'))
-                      }}
-                    >
-                      <SelectTrigger className={validationErrors.some(e => e.field === 'warehouse_id') ? 'border-red-500' : ''}>
-                        <SelectValue placeholder="选择仓库" />
-                      </SelectTrigger>
-                      <SelectContent>
-                        {warehouses.map((warehouse) => (
-                          <SelectItem key={warehouse.id} value={warehouse.id.toString()}>
-                            {warehouse.name}
-                          </SelectItem>
-                        ))}
-                      </SelectContent>
-                    </Select>
-                    {validationErrors.filter(e => e.field === 'warehouse_id').map((error, index) => (
+                    <div className="space-y-3">
+                      <div className="flex flex-wrap gap-2">
+                        {warehouses.map(warehouse => {
+                          const isSelected = formData.warehouse_ids.includes(warehouse.id)
+                          const hasInventory = editingProduct?.warehouses.find(w => w.warehouse_id === warehouse.id)
+                          const cannotUnselect = editingProduct && hasInventory &&
+                            (hasInventory.finished > 0 || hasInventory.shipped > 0)
+
+                          return (
+                            <button
+                              key={warehouse.id}
+                              type="button"
+                              disabled={cannotUnselect && isSelected}
+                              onClick={() => {
+                                if (isSelected) {
+                                  setFormData(prev => ({
+                                    ...prev,
+                                    warehouse_ids: prev.warehouse_ids.filter(id => id !== warehouse.id)
+                                  }))
+                                } else {
+                                  setFormData(prev => ({
+                                    ...prev,
+                                    warehouse_ids: [...prev.warehouse_ids, warehouse.id]
+                                  }))
+                                }
+                                setValidationErrors(prev => prev.filter(error => error.field !== 'warehouse_ids'))
+                              }}
+                              title={cannotUnselect && isSelected ?
+                                `${warehouse.name} (成品: ${hasInventory?.finished}, 出库: ${hasInventory?.shipped}) - 有库存，无法移除` :
+                                warehouse.name
+                              }
+                              className={`
+                                inline-flex items-center gap-1 px-3 py-2 rounded-md border text-sm font-medium transition-all
+                                ${isSelected
+                                  ? cannotUnselect
+                                    ? 'bg-orange-100 border-orange-300 text-orange-800 cursor-not-allowed'
+                                    : 'bg-blue-100 border-blue-300 text-blue-800 hover:bg-blue-200'
+                                  : 'bg-white border-gray-300 text-gray-700 hover:bg-gray-50 hover:border-gray-400'
+                                }
+                                ${cannotUnselect && isSelected ? 'opacity-75' : ''}
+                              `}
+                            >
+                              {warehouse.name}
+                              {isSelected && (
+                                cannotUnselect ? (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                                  </svg>
+                                ) : (
+                                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M5 13l4 4L19 7" />
+                                  </svg>
+                                )
+                              )}
+                            </button>
+                          )
+                        })}
+                      </div>
+                      {formData.warehouse_ids.length > 0 && (
+                        <div className="text-sm text-gray-600">
+                          已选择 {formData.warehouse_ids.length} 个仓库
+                        </div>
+                      )}
+                    </div>
+                    {validationErrors.filter(e => e.field === 'warehouse_ids').map((error, index) => (
                       <p key={index} className="text-sm text-red-500 mt-1">{error.message}</p>
                     ))}
                   </div>
@@ -760,7 +819,18 @@ export default function ComboProductsPage() {
                     {product.name}
                   </TableCell>
                   <TableCell className="font-mono text-sm">{product.sku}</TableCell>
-                  <TableCell>{product.warehouse_name}</TableCell>
+                  <TableCell>
+                    <div className="space-y-1">
+                      {product.warehouses.map((warehouse) => (
+                        <div key={warehouse.warehouse_id} className="text-sm">
+                          <span className="font-medium">{warehouse.warehouse_name}</span>
+                          <div className="text-xs text-gray-500">
+                            成品: {warehouse.finished} | 出库: {warehouse.shipped}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </TableCell>
                   <TableCell>
                     {product.packaging_relations && product.packaging_relations.length > 0 ? (
                       <div className="space-y-1">

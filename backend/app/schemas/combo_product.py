@@ -38,10 +38,10 @@ class ComboProductItem(ComboProductItemBase):
 class ComboProductBase(BaseModel):
     name: str
     sku: str
-    warehouse_id: int
 
 
 class ComboProductCreate(ComboProductBase):
+    warehouse_ids: List[int]  # 所属仓库ID列表
     combo_items: List[ComboProductItemCreate]  # 组合明细
     packaging_relations: Optional[List[ComboProductPackagingRelationCreate]] = []
 
@@ -49,18 +49,29 @@ class ComboProductCreate(ComboProductBase):
 class ComboProductUpdate(BaseModel):
     name: Optional[str] = None
     sku: Optional[str] = None
-    warehouse_id: Optional[int] = None
+    warehouse_ids: Optional[List[int]] = None  # 所属仓库ID列表
     combo_items: Optional[List[ComboProductItemCreate]] = None
     packaging_relations: Optional[List[ComboProductPackagingRelationCreate]] = None
+
+
+# 仓库信息Schema
+class WarehouseInfo(BaseModel):
+    warehouse_id: int
+    warehouse_name: str
+    finished: int = 0  # 成品库存
+    shipped: int = 0   # 出库数量
+
+    class Config:
+        from_attributes = True
 
 
 class ComboProduct(ComboProductBase):
     id: int
     created_at: datetime
     updated_at: Optional[datetime] = None
-    
+
     # 关联信息
-    warehouse_name: Optional[str] = None
+    warehouses: List[WarehouseInfo] = []  # 所属仓库及库存信息
     combo_items: List[ComboProductItem] = []
     packaging_relations: List[ComboProductPackagingRelation] = []
 
@@ -125,6 +136,7 @@ class ComboInventoryTransaction(ComboInventoryTransactionBase):
 class ComboProductAssembleRequest(BaseModel):
     """组合商品组装请求"""
     combo_product_id: int
+    warehouse_id: int  # 指定在哪个仓库组装
     quantity: int
     notes: Optional[str] = None
 
@@ -132,6 +144,7 @@ class ComboProductAssembleRequest(BaseModel):
 class ComboProductShipRequest(BaseModel):
     """组合商品出库请求"""
     combo_product_id: int
+    warehouse_id: int  # 指定从哪个仓库出库
     quantity: int
     notes: Optional[str] = None
 

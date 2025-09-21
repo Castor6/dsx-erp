@@ -95,11 +95,15 @@ class InventorySummary(BaseModel):
     """库存汇总信息"""
     warehouse_id: int
     warehouse_name: str
-    total_products: int = Field(description="商品种类总数")
+    total_products: int = Field(description="基础商品种类总数")
     total_in_transit: int = Field(description="总在途数量")
     total_semi_finished: int = Field(description="总半成品数量")
     total_finished: int = Field(description="总成品数量")
     total_shipped: int = Field(description="总出库数量")
+    # 组合商品统计
+    total_combo_products: int = Field(description="组合商品种类总数", default=0)
+    total_combo_finished: int = Field(description="组合商品成品总数", default=0)
+    total_combo_shipped: int = Field(description="组合商品出库总数", default=0)
 
 
 # 延迟导入解决循环依赖
