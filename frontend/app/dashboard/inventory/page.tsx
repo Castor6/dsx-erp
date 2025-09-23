@@ -30,19 +30,21 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
-import { 
-  Warehouse, 
-  Package, 
-  TrendingUp, 
-  BarChart3, 
-  Layers, 
+import {
+  Warehouse,
+  Package,
+  TrendingUp,
+  BarChart3,
+  Layers,
   Search,
   Plus,
   ChevronLeft,
   ChevronRight,
-  Loader2
+  Loader2,
+  Truck
 } from 'lucide-react'
 import { api } from '@/lib/api'
+import BatchShippingDialog from '@/components/dashboard/BatchShippingDialog'
 
 interface InventoryRecord {
   id: number
@@ -159,6 +161,15 @@ interface ComboPackagingDetails {
     required_quantity: number
     packaging_list: PackagingInventoryItem[]
   }>
+  base_products_inventory?: Array<{
+    base_product_id: number
+    base_product_name: string
+    base_product_sku: string
+    required_quantity: number
+    current_stock: number
+    available_stock: number
+    stock_status: string
+  }>
 }
 
 export default function InventoryPage() {
@@ -204,7 +215,8 @@ export default function InventoryPage() {
   const [packagingInventory, setPackagingInventory] = useState<PackagingInventoryItem[]>([])
   const [packagingProductInfo, setPackagingProductInfo] = useState<{name: string, sku: string} | null>(null)
   const [comboPackagingDetails, setComboPackagingDetails] = useState<ComboPackagingDetails | null>(null)
-  
+  const [isBatchShippingDialogOpen, setIsBatchShippingDialogOpen] = useState(false)
+
   const { toast } = useToast()
 
   // API 调用函数
@@ -296,11 +308,11 @@ export default function InventoryPage() {
         warehouseName = comboProduct.warehouses[0].warehouse_name
       } else if (targetWarehouseId) {
         // 优先从组合商品的仓库列表中查找
-        const warehouseInfo = comboProduct.warehouses?.find(w => w.warehouse_id === targetWarehouseId)
+        const warehouseInfo = comboProduct.warehouses?.find((w: any) => w.warehouse_id === targetWarehouseId)
         if (warehouseInfo) {
           warehouseName = warehouseInfo.warehouse_name
         } else {
-          const warehouse = warehouses.find(w => w.id === targetWarehouseId)
+          const warehouse = warehouses.find((w: any) => w.id === targetWarehouseId)
           warehouseName = warehouse?.name || '未知仓库'
         }
       }
@@ -983,6 +995,15 @@ export default function InventoryPage() {
           <h1 className="text-2xl font-bold text-gray-900">库存管理</h1>
           <p className="text-gray-600">查看和管理各仓库的库存状况，若未查询到商品库存记录请先创建采购单</p>
         </div>
+        <div className="flex items-center gap-3">
+          <Button
+            onClick={() => setIsBatchShippingDialogOpen(true)}
+            className="flex items-center gap-2"
+          >
+            <Truck className="h-4 w-4" />
+            批量出库
+          </Button>
+        </div>
       </div>
 
       {/* 库存汇总卡片 */}
@@ -1278,7 +1299,7 @@ export default function InventoryPage() {
                 disabled={
                   !actionForm.quantity ||
                   Number(actionForm.quantity) <= 0 ||
-                  (actionForm.maxQuantity && Number(actionForm.quantity) > actionForm.maxQuantity)
+                  (!!actionForm.maxQuantity && Number(actionForm.quantity) > actionForm.maxQuantity)
                 }
               >
                 确认操作
@@ -1646,6 +1667,22 @@ export default function InventoryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* 批量出库对话框 */}
+      <BatchShippingDialog
+        open={isBatchShippingDialogOpen}
+        onOpenChange={setIsBatchShippingDialogOpen}
+        warehouses={warehouses}
+        onSuccess={async () => {
+          // 刷新库存数据
+          await fetchInventorySummary()
+          if (activeTab === 'base') {
+            await fetchBaseInventory(baseInventory.page)
+          } else {
+            await fetchComboInventory(comboInventory.page)
+          }
+        }}
+      />
     </div>
   )
 }

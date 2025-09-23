@@ -4,7 +4,9 @@
       "Bash(git add:*)",
       "Bash(dir:*)",
       "Bash(alembic revision:*)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(npm run type-check:*)",
+      "Bash(npm run build:*)"
     ],
     "deny": [],
     "ask": []

@@ -190,7 +190,7 @@ export default function ComboProductsPage() {
       const allProducts = [...baseProducts]
       
       // 添加API返回的商品，避免重复
-      apiItems.forEach(apiProduct => {
+      apiItems.forEach((apiProduct: any) => {
         if (!allProducts.some(existing => existing.id === apiProduct.id)) {
           allProducts.push(apiProduct)
         }
@@ -622,7 +622,7 @@ export default function ComboProductsPage() {
                             <button
                               key={warehouse.id}
                               type="button"
-                              disabled={cannotUnselect && isSelected}
+                              disabled={!!(cannotUnselect && isSelected)}
                               onClick={() => {
                                 if (isSelected) {
                                   setFormData(prev => ({

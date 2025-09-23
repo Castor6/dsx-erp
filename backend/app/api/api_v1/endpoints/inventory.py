@@ -21,7 +21,10 @@ from app.schemas.inventory import (
     InventoryTransactionCreate,
     PackagingRequest,
     ShippingRequest,
-    InventorySummary
+    InventorySummary,
+    BatchShippingRequest,
+    BatchShippingResponse,
+    ProductSearchItem
 )
 from app.schemas.combo_product import (
     ComboInventoryRecord as ComboInventoryRecordSchema,
@@ -1146,3 +1149,264 @@ async def _calculate_available_to_assemble(combo_product: ComboProduct, warehous
             min_available = min(min_available, available_from_combo_packaging)
     
     return int(min_available) if min_available != float('inf') else 0
+
+
+# ========== 批量出库功能端点 ==========
+
+@router.get("/search-products")
+async def search_products_for_shipping(
+    warehouse_id: int = Query(description="仓库ID"),
+    search: str = Query(description="搜索关键字（商品名称或SKU）"),
+    limit: int = Query(10, ge=1, le=50, description="返回结果数量限制"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """搜索指定仓库中可出库的商品（基础商品和组合商品）"""
+    results = []
+
+    # 搜索基础商品（非包材，有成品库存）
+    base_query = select(InventoryRecord).options(
+        selectinload(InventoryRecord.product)
+    ).join(Product).where(
+        and_(
+            InventoryRecord.warehouse_id == warehouse_id,
+            InventoryRecord.finished > 0,  # 有成品库存
+            Product.sale_type == SaleType.PRODUCT,  # 商品类型（非包材）
+            or_(
+                Product.name.contains(search),
+                Product.sku.contains(search)
+            )
+        )
+    ).limit(limit // 2)  # 为组合商品预留一半空间
+
+    base_result = await db.execute(base_query)
+    base_records = base_result.scalars().all()
+
+    for record in base_records:
+        results.append(ProductSearchItem(
+            id=record.product_id,
+            name=record.product.name,
+            sku=record.product.sku,
+            type="product",
+            finished_stock=record.finished,
+            available_stock=record.finished
+        ))
+
+    # 搜索组合商品（有成品库存）
+    combo_query = select(ComboInventoryRecord).options(
+        selectinload(ComboInventoryRecord.combo_product)
+    ).join(ComboProduct).where(
+        and_(
+            ComboInventoryRecord.warehouse_id == warehouse_id,
+            ComboInventoryRecord.finished > 0,  # 有成品库存
+            or_(
+                ComboProduct.name.contains(search),
+                ComboProduct.sku.contains(search)
+            )
+        )
+    ).limit(limit - len(results))  # 剩余空间给组合商品
+
+    combo_result = await db.execute(combo_query)
+    combo_records = combo_result.scalars().all()
+
+    for record in combo_records:
+        results.append(ProductSearchItem(
+            id=record.combo_product_id,
+            name=record.combo_product.name,
+            sku=record.combo_product.sku,
+            type="combo",
+            finished_stock=record.finished,
+            available_stock=record.finished
+        ))
+
+    return results
+
+
+@router.post("/batch-ship", response_model=BatchShippingResponse)
+async def batch_ship_products(
+    request: BatchShippingRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """批量出库商品"""
+    success_count = 0
+    failed_items = []
+
+    # 验证仓库是否存在
+    warehouse_result = await db.execute(
+        select(Warehouse).where(Warehouse.id == request.warehouse_id)
+    )
+    warehouse = warehouse_result.scalar_one_or_none()
+    if not warehouse:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="仓库不存在"
+        )
+
+    # 处理每个出库项目
+    for item in request.items:
+        try:
+            if item.product_id:
+                # 处理基础商品出库
+                await _process_base_product_shipping(
+                    db, item.product_id, request.warehouse_id, item.quantity, request.notes
+                )
+            elif item.combo_product_id:
+                # 处理组合商品出库
+                await _process_combo_product_shipping(
+                    db, item.combo_product_id, request.warehouse_id, item.quantity, request.notes
+                )
+
+            success_count += 1
+
+        except HTTPException as e:
+            # 记录失败项目
+            product_info = await _get_product_info(db, item.product_id, item.combo_product_id)
+            failed_items.append({
+                "product_name": product_info["name"],
+                "product_sku": product_info["sku"],
+                "quantity": item.quantity,
+                "error": str(e.detail)
+            })
+        except Exception as e:
+            # 记录其他错误
+            product_info = await _get_product_info(db, item.product_id, item.combo_product_id)
+            failed_items.append({
+                "product_name": product_info["name"],
+                "product_sku": product_info["sku"],
+                "quantity": item.quantity,
+                "error": f"出库失败: {str(e)}"
+            })
+
+    # 提交事务
+    if success_count > 0:
+        await db.commit()
+
+    # 返回结果
+    total_count = len(request.items)
+    if success_count == total_count:
+        message = f"批量出库成功，共处理 {total_count} 个商品"
+    elif success_count == 0:
+        message = "批量出库失败，所有商品出库失败"
+    else:
+        message = f"批量出库部分成功，成功 {success_count}/{total_count} 个商品"
+
+    return BatchShippingResponse(
+        success_count=success_count,
+        total_count=total_count,
+        failed_items=failed_items,
+        message=message
+    )
+
+
+# 批量出库辅助函数
+async def _process_base_product_shipping(
+    db: AsyncSession, product_id: int, warehouse_id: int, quantity: int, notes: str
+):
+    """处理基础商品出库"""
+    # 检查最大可出库数量
+    inventory_result = await db.execute(
+        select(InventoryRecord).where(
+            InventoryRecord.product_id == product_id,
+            InventoryRecord.warehouse_id == warehouse_id
+        )
+    )
+    inventory = inventory_result.scalar_one_or_none()
+
+    if not inventory:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="库存记录不存在"
+        )
+
+    if quantity > inventory.finished:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"出库数量超出限制，最大可出库数量：{inventory.finished}，当前成品库存：{inventory.finished}"
+        )
+
+    # 转移库存：成品 -> 出库
+    await _transfer_inventory(
+        db,
+        product_id=product_id,
+        warehouse_id=warehouse_id,
+        from_status="finished",
+        to_status="shipped",
+        quantity=quantity
+    )
+
+    # 记录库存变动
+    await _create_inventory_transaction(
+        db,
+        product_id=product_id,
+        warehouse_id=warehouse_id,
+        transaction_type="批量出库",
+        from_status=InventoryStatus.FINISHED,
+        to_status=InventoryStatus.SHIPPED,
+        quantity=quantity,
+        notes=notes or "批量出库"
+    )
+
+
+async def _process_combo_product_shipping(
+    db: AsyncSession, combo_product_id: int, warehouse_id: int, quantity: int, notes: str
+):
+    """处理组合商品出库"""
+    # 检查组合商品库存
+    combo_inventory_result = await db.execute(
+        select(ComboInventoryRecord).where(
+            ComboInventoryRecord.combo_product_id == combo_product_id,
+            ComboInventoryRecord.warehouse_id == warehouse_id
+        )
+    )
+    combo_inventory = combo_inventory_result.scalar_one_or_none()
+
+    if not combo_inventory:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="组合商品库存记录不存在"
+        )
+
+    if quantity > combo_inventory.finished:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"出库数量超出限制，最大可出库数量：{combo_inventory.finished}，当前成品库存：{combo_inventory.finished}"
+        )
+
+    # 转移库存：成品 -> 出库
+    combo_inventory.finished -= quantity
+    combo_inventory.shipped += quantity
+
+    # 记录库存变动
+    combo_transaction = ComboInventoryTransaction(
+        combo_product_id=combo_product_id,
+        warehouse_id=warehouse_id,
+        transaction_type="批量出库",
+        quantity=quantity,
+        notes=notes or "批量出库"
+    )
+    db.add(combo_transaction)
+
+
+async def _get_product_info(db: AsyncSession, product_id: Optional[int], combo_product_id: Optional[int]):
+    """获取商品信息（用于错误报告）"""
+    if product_id:
+        result = await db.execute(
+            select(Product).where(Product.id == product_id)
+        )
+        product = result.scalar_one_or_none()
+        return {
+            "name": product.name if product else "未知商品",
+            "sku": product.sku if product else "未知SKU"
+        }
+    elif combo_product_id:
+        result = await db.execute(
+            select(ComboProduct).where(ComboProduct.id == combo_product_id)
+        )
+        combo_product = result.scalar_one_or_none()
+        return {
+            "name": combo_product.name if combo_product else "未知组合商品",
+            "sku": combo_product.sku if combo_product else "未知SKU"
+        }
+
+    return {"name": "未知商品", "sku": "未知SKU"}

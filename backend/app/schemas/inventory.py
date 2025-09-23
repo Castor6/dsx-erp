@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field, computed_field
+from pydantic import BaseModel, Field, computed_field, model_validator
 from typing import Optional
 from datetime import datetime
 
@@ -104,6 +104,47 @@ class InventorySummary(BaseModel):
     total_combo_products: int = Field(description="组合商品种类总数", default=0)
     total_combo_finished: int = Field(description="组合商品成品总数", default=0)
     total_combo_shipped: int = Field(description="组合商品出库总数", default=0)
+
+
+class BatchShippingItemRequest(BaseModel):
+    """批量出库单项请求"""
+    product_id: Optional[int] = Field(None, description="基础商品ID")
+    combo_product_id: Optional[int] = Field(None, description="组合商品ID")
+    quantity: int = Field(gt=0, description="出库数量必须大于0")
+
+    @model_validator(mode='after')
+    def validate_product_ids(self):
+        """验证必须提供product_id或combo_product_id中的一个"""
+        if not self.product_id and not self.combo_product_id:
+            raise ValueError('必须提供product_id或combo_product_id')
+        if self.product_id and self.combo_product_id:
+            raise ValueError('product_id和combo_product_id不能同时提供')
+        return self
+
+
+class BatchShippingRequest(BaseModel):
+    """批量出库请求"""
+    warehouse_id: int = Field(description="仓库ID")
+    items: list[BatchShippingItemRequest] = Field(min_items=1, description="出库商品列表")
+    notes: Optional[str] = Field(None, max_length=500, description="批量出库备注")
+
+
+class ProductSearchItem(BaseModel):
+    """商品搜索结果项"""
+    id: int
+    name: str
+    sku: str
+    type: str = Field(description="商品类型：product|combo")
+    finished_stock: int = Field(description="成品库存数量")
+    available_stock: int = Field(description="可用库存数量")
+
+
+class BatchShippingResponse(BaseModel):
+    """批量出库响应"""
+    success_count: int = Field(description="成功出库的商品数量")
+    total_count: int = Field(description="总商品数量")
+    failed_items: list[dict] = Field(description="失败的商品列表")
+    message: str = Field(description="响应消息")
 
 
 # 延迟导入解决循环依赖
