@@ -771,7 +771,7 @@ export default function InventoryPage() {
                         查看包材
                       </Button>
                     )}
-                    {record.product?.sale_type === '商品' && record.semi_finished > 0 && (
+                    {record.product?.sale_type === '商品' && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -780,7 +780,7 @@ export default function InventoryPage() {
                         打包
                       </Button>
                     )}
-                    {record.product?.sale_type === '商品' && record.finished > 0 && (
+                    {record.product?.sale_type === '商品' && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -815,10 +815,10 @@ export default function InventoryPage() {
             <TableRow>
               <TableHead>组合商品信息</TableHead>
               <TableHead>仓库</TableHead>
-              <TableHead className="text-right">已组装</TableHead>
-              <TableHead className="text-right">已出库</TableHead>
-              <TableHead className="text-right">可组装数量</TableHead>
-              <TableHead>状态</TableHead>
+              <TableHead className="text-right">成品</TableHead>
+              <TableHead className="text-right">出库</TableHead>
+              <TableHead className="text-right">可用库存</TableHead>
+              <TableHead>库存状态</TableHead>
               <TableHead>操作</TableHead>
             </TableRow>
           </TableHeader>
@@ -849,32 +849,32 @@ export default function InventoryPage() {
                 </TableCell>
                 <TableCell className="text-right">
                   <span className={`font-medium ${
-                    record.available_to_assemble === 0 ? 'text-red-600' :
-                    record.available_to_assemble < 5 ? 'text-orange-600' : 'text-green-600'
+                    record.finished === 0 ? 'text-red-600' :
+                    record.finished < 10 ? 'text-orange-600' : 'text-green-600'
                   }`}>
-                    {record.available_to_assemble}
+                    {record.finished}
                   </span>
                 </TableCell>
                 <TableCell>
                   <div className="flex items-center gap-1">
                     {(() => {
-                      if (record.available_to_assemble === 0) {
+                      if (record.finished === 0) {
                         return (
                           <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-red-100 text-red-800">
-                            无法组装
+                            缺货
                           </span>
                         )
                       }
-                      if (record.available_to_assemble < 5) {
+                      if (record.finished < 10) {
                         return (
                           <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-orange-100 text-orange-800">
-                            组装数量偏低
+                            库存偏低
                           </span>
                         )
                       }
                       return (
                         <span className="inline-flex items-center px-2 py-1 rounded-full text-xs font-medium bg-green-100 text-green-800">
-                          可正常组装
+                          库存充足
                         </span>
                       )
                     })()}
@@ -888,26 +888,22 @@ export default function InventoryPage() {
                       onClick={() => fetchComboProductDetails(record.combo_product_id, record.warehouse_id)}
                       className="text-blue-600 hover:text-blue-800 p-1 h-auto"
                     >
-                      查看明细
+                      查看组合明细
                     </Button>
-                    {record.available_to_assemble > 0 && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => openActionDialog('assemble', undefined, record.combo_product_id, record.warehouse_id)}
-                      >
-                        打包
-                      </Button>
-                    )}
-                    {record.finished > 0 && (
-                      <Button
-                        size="sm"
-                        variant="outline"
-                        onClick={() => openActionDialog('combo-ship', undefined, record.combo_product_id, record.warehouse_id)}
-                      >
-                        出库
-                      </Button>
-                    )}
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => openActionDialog('assemble', undefined, record.combo_product_id, record.warehouse_id)}
+                    >
+                      打包
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => openActionDialog('combo-ship', undefined, record.combo_product_id, record.warehouse_id)}
+                    >
+                      出库
+                    </Button>
                   </div>
                 </TableCell>
               </TableRow>
@@ -1219,56 +1215,40 @@ export default function InventoryPage() {
 
             <div>
               <Label>数量 *</Label>
-              <div className="flex gap-2">
-                <Input
-                  type="number"
-                  min="1"
-                  max={actionForm.maxQuantity || undefined}
-                  value={actionForm.quantity}
-                  onChange={(e) => {
-                    const value = e.target.value
-                    const numValue = Number(value)
+              <Input
+                type="number"
+                min="1"
+                max={actionForm.maxQuantity || undefined}
+                value={actionForm.quantity}
+                onChange={(e) => {
+                  const value = e.target.value
+                  const numValue = Number(value)
 
-                    // 实时验证并显示错误提示
-                    if (value && actionForm.maxQuantity && numValue > actionForm.maxQuantity) {
-                      toast({
-                        title: "数量超限",
-                        description: `输入数量超过最大可操作数量 ${actionForm.maxQuantity}`,
-                        variant: "destructive",
-                        duration: 2000
-                      })
-                    }
+                  // 实时验证并显示错误提示
+                  if (value && actionForm.maxQuantity && numValue > actionForm.maxQuantity) {
+                    toast({
+                      title: "数量超限",
+                      description: `输入数量超过最大可操作数量 ${actionForm.maxQuantity}`,
+                      variant: "destructive",
+                      duration: 2000
+                    })
+                  }
 
-                    setActionForm(prev => ({
-                      ...prev,
-                      quantity: value || ''
-                    }))
-                  }}
-                  placeholder={`请输入数量（最大：${actionForm.maxQuantity || 0}）`}
-                  className={`flex-1 ${
-                    actionForm.quantity &&
-                    actionForm.maxQuantity &&
-                    Number(actionForm.quantity) > actionForm.maxQuantity
-                      ? 'border-red-500 focus:ring-red-500'
-                      : ''
-                  }`}
-                  required
-                />
-                {actionForm.maxQuantity && actionForm.maxQuantity > 0 && (
-                  <Button
-                    type="button"
-                    variant="outline"
-                    size="sm"
-                    onClick={() => setActionForm(prev => ({
-                      ...prev,
-                      quantity: prev.maxQuantity?.toString() || ''
-                    }))}
-                    className="whitespace-nowrap"
-                  >
-                    使用最大数量
-                  </Button>
-                )}
-              </div>
+                  setActionForm(prev => ({
+                    ...prev,
+                    quantity: value || ''
+                  }))
+                }}
+                placeholder={`请输入数量（最大：${actionForm.maxQuantity || 0}）`}
+                className={`${
+                  actionForm.quantity &&
+                  actionForm.maxQuantity &&
+                  Number(actionForm.quantity) > actionForm.maxQuantity
+                    ? 'border-red-500 focus:ring-red-500'
+                    : ''
+                }`}
+                required
+              />
               {actionForm.quantity &&
                actionForm.maxQuantity &&
                Number(actionForm.quantity) > actionForm.maxQuantity && (
@@ -1674,13 +1654,10 @@ export default function InventoryPage() {
         onOpenChange={setIsBatchShippingDialogOpen}
         warehouses={warehouses}
         onSuccess={async () => {
-          // 刷新库存数据
+          // 刷新库存数据 - 批量出库可能涉及基础商品和组合商品，所以都需要刷新
           await fetchInventorySummary()
-          if (activeTab === 'base') {
-            await fetchBaseInventory(baseInventory.page)
-          } else {
-            await fetchComboInventory(comboInventory.page)
-          }
+          await fetchBaseInventory(baseInventory.page)
+          await fetchComboInventory(comboInventory.page)
         }}
       />
     </div>

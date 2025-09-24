@@ -445,7 +445,7 @@ export default function BatchShippingDialog({
                                     updateQuantity(index, numValue)
                                   }
                                 }}
-                                className={`w-20 text-right ${
+                                className={`w-24 text-right ${
                                   (typeof item.quantity === 'number' && item.quantity > item.max_quantity) ||
                                   (typeof item.quantity === 'number' && item.quantity <= 0)
                                     ? 'border-red-500' : ''
