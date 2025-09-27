@@ -14,6 +14,7 @@ import {
   Truck,
   Link2,
   Layers,
+  FileText,
 } from 'lucide-react'
 
 const navigation = [
@@ -62,6 +63,11 @@ const navigation = [
     name: '库存管理',
     href: '/dashboard/inventory',
     icon: Box,
+  },
+  {
+    name: '库存操作日志',
+    href: '/dashboard/inventory-logs',
+    icon: FileText,
   },
 ]
 

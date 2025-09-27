@@ -136,7 +136,7 @@ export default function LoginPage() {
           </Form>
         </CardContent>
         <CardFooter className="text-center text-sm text-gray-500">
-          默认管理员账户：admin / admin123
+
         </CardFooter>
       </Card>
     </div>

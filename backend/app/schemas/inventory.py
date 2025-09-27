@@ -145,11 +145,57 @@ class BatchShippingResponse(BaseModel):
     total_count: int = Field(description="总商品数量")
     failed_items: list[dict] = Field(description="失败的商品列表")
     message: str = Field(description="响应消息")
+    batch_id: Optional[str] = Field(None, description="批次ID")
+
+
+class BatchShippingRecordBase(BaseModel):
+    """批量出库记录基础模型"""
+    batch_id: str = Field(description="批次唯一标识")
+    warehouse_id: int = Field(description="仓库ID")
+    total_items_count: int = Field(description="总商品种类数")
+    total_quantity: int = Field(description="总出库数量")
+    operator_id: int = Field(description="操作人ID")
+    notes: Optional[str] = Field(None, description="批量出库备注")
+
+
+class BatchShippingRecord(BatchShippingRecordBase):
+    """批量出库记录"""
+    id: int
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BatchShippingRecordWithDetails(BatchShippingRecord):
+    """带详情的批量出库记录"""
+    warehouse: Optional[Warehouse] = None
+    operator: Optional[User] = None
+
+    class Config:
+        from_attributes = True
+
+
+class BatchShippingItemDetail(BaseModel):
+    """批量出库商品明细"""
+    product_id: Optional[int] = None
+    combo_product_id: Optional[int] = None
+    product_name: str = Field(description="商品名称")
+    sku: str = Field(description="商品SKU")
+    quantity: int = Field(description="出库数量")
+    type: str = Field(description="商品类型：product|combo")
+
+
+class BatchShippingRecordDetail(BaseModel):
+    """批量出库记录详情"""
+    record: BatchShippingRecordWithDetails
+    items: list[BatchShippingItemDetail] = Field(description="出库商品明细列表")
 
 
 # 延迟导入解决循环依赖
 from app.schemas.product import Product
 from app.schemas.warehouse import Warehouse
+from app.schemas.user import User
 
 InventoryRecordWithDetails.model_rebuild()
 InventoryTransactionWithDetails.model_rebuild()

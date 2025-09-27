@@ -2,6 +2,7 @@ from sqlalchemy import Column, Integer, String, DateTime, ForeignKey, Enum
 from sqlalchemy.sql import func
 from sqlalchemy.orm import relationship
 import enum
+import uuid
 from app.core.database import Base
 
 
@@ -42,9 +43,28 @@ class InventoryTransaction(Base):
     to_status = Column(Enum(InventoryStatus), nullable=True)    # 目标状态
     quantity = Column(Integer, nullable=False)  # 变动数量
     reference_id = Column(Integer, nullable=True)  # 关联单据ID
+    batch_id = Column(String(36), nullable=True)  # 批次ID，用于批量操作
     notes = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     
     # 关系
     product = relationship("Product")
     warehouse = relationship("Warehouse")
+
+
+class BatchShippingRecord(Base):
+    """批量出库记录主表"""
+    __tablename__ = "batch_shipping_records"
+
+    id = Column(Integer, primary_key=True, index=True)
+    batch_id = Column(String(36), unique=True, nullable=False, index=True)  # 批次唯一标识
+    warehouse_id = Column(Integer, ForeignKey("warehouses.id"), nullable=False)
+    total_items_count = Column(Integer, nullable=False)  # 总商品种类数
+    total_quantity = Column(Integer, nullable=False)  # 总出库数量
+    operator_id = Column(Integer, ForeignKey("users.id"), nullable=False)  # 操作人ID
+    notes = Column(String(500), nullable=True)  # 批量出库备注
+    created_at = Column(DateTime(timezone=True), server_default=func.now())
+
+    # 关系
+    warehouse = relationship("Warehouse")
+    operator = relationship("User")

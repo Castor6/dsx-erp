@@ -6,7 +6,13 @@
       "Bash(alembic revision:*)",
       "Bash(python:*)",
       "Bash(npm run type-check:*)",
-      "Bash(npm run build:*)"
+      "Bash(npm run build:*)",
+      "Bash(xargs:*)",
+      "Bash(npm install:*)",
+      "Bash(find:*)",
+      "Bash(npx:*)",
+      "Bash(npm run lint)",
+      "Bash(npm run dev:*)"
     ],
     "deny": [],
     "ask": []

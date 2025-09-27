@@ -67,6 +67,7 @@ class ComboInventoryTransaction(Base):
     transaction_type = Column(String(50), nullable=False)  # 变动类型：组装、出库
     quantity = Column(Integer, nullable=False)  # 变动数量
     reference_id = Column(Integer, nullable=True)  # 关联单据ID
+    batch_id = Column(String(36), nullable=True)  # 批次ID，用于批量操作
     notes = Column(String(500), nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     

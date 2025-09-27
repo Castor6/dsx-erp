@@ -4,11 +4,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, and_, or_
 from sqlalchemy.orm import selectinload
 from pydantic import BaseModel
+import uuid
+from datetime import datetime, timedelta
 
 from app.core.database import get_db
 from app.core.security import get_current_active_user
 from app.models.user import User
-from app.models.inventory import InventoryRecord, InventoryTransaction, InventoryStatus
+from app.models.inventory import InventoryRecord, InventoryTransaction, InventoryStatus, BatchShippingRecord
 from app.models.product import Product, SaleType
 from app.models.packaging_relation import ProductPackagingRelation, ComboProductPackagingRelation, ComboItemPackagingRelation
 from app.models.warehouse import Warehouse
@@ -526,7 +528,8 @@ async def _transfer_inventory(
 async def _create_inventory_transaction(
     db: AsyncSession, product_id: int, warehouse_id: int,
     transaction_type: str, quantity: int, reference_id: int = None,
-    from_status: InventoryStatus = None, to_status: InventoryStatus = None, notes: str = None
+    from_status: InventoryStatus = None, to_status: InventoryStatus = None,
+    notes: str = None, batch_id: str = None
 ):
     """创建库存变动记录"""
     transaction = InventoryTransaction(
@@ -537,6 +540,7 @@ async def _create_inventory_transaction(
         to_status=to_status,
         quantity=quantity,
         reference_id=reference_id,
+        batch_id=batch_id,
         notes=notes
     )
     db.add(transaction)
@@ -1231,6 +1235,8 @@ async def batch_ship_products(
     """批量出库商品"""
     success_count = 0
     failed_items = []
+    success_items = []  # 记录成功的项目
+    batch_id = str(uuid.uuid4())  # 生成批次ID
 
     # 验证仓库是否存在
     warehouse_result = await db.execute(
@@ -1249,15 +1255,16 @@ async def batch_ship_products(
             if item.product_id:
                 # 处理基础商品出库
                 await _process_base_product_shipping(
-                    db, item.product_id, request.warehouse_id, item.quantity, request.notes
+                    db, item.product_id, request.warehouse_id, item.quantity, request.notes, batch_id
                 )
             elif item.combo_product_id:
                 # 处理组合商品出库
                 await _process_combo_product_shipping(
-                    db, item.combo_product_id, request.warehouse_id, item.quantity, request.notes
+                    db, item.combo_product_id, request.warehouse_id, item.quantity, request.notes, batch_id
                 )
 
             success_count += 1
+            success_items.append(item)  # 记录成功的项目
 
         except HTTPException as e:
             # 记录失败项目
@@ -1278,6 +1285,23 @@ async def batch_ship_products(
                 "error": f"出库失败: {str(e)}"
             })
 
+    # 如果有成功的出库，创建批次记录
+    batch_record = None
+    if success_count > 0:
+        # 计算成功出库的总数量
+        success_quantity = sum(item.quantity for item in success_items)
+
+        # 创建批量出库记录
+        batch_record = BatchShippingRecord(
+            batch_id=batch_id,
+            warehouse_id=request.warehouse_id,
+            total_items_count=success_count,
+            total_quantity=success_quantity,
+            operator_id=current_user.id,
+            notes=request.notes
+        )
+        db.add(batch_record)
+
     # 提交事务
     if success_count > 0:
         await db.commit()
@@ -1295,13 +1319,14 @@ async def batch_ship_products(
         success_count=success_count,
         total_count=total_count,
         failed_items=failed_items,
-        message=message
+        message=message,
+        batch_id=batch_id if success_count > 0 else None
     )
 
 
 # 批量出库辅助函数
 async def _process_base_product_shipping(
-    db: AsyncSession, product_id: int, warehouse_id: int, quantity: int, notes: str
+    db: AsyncSession, product_id: int, warehouse_id: int, quantity: int, notes: str, batch_id: str
 ):
     """处理基础商品出库"""
     # 检查最大可出库数量
@@ -1344,12 +1369,13 @@ async def _process_base_product_shipping(
         from_status=InventoryStatus.FINISHED,
         to_status=InventoryStatus.SHIPPED,
         quantity=quantity,
+        batch_id=batch_id,
         notes=notes or "批量出库"
     )
 
 
 async def _process_combo_product_shipping(
-    db: AsyncSession, combo_product_id: int, warehouse_id: int, quantity: int, notes: str
+    db: AsyncSession, combo_product_id: int, warehouse_id: int, quantity: int, notes: str, batch_id: str
 ):
     """处理组合商品出库"""
     # 检查组合商品库存
@@ -1383,6 +1409,7 @@ async def _process_combo_product_shipping(
         warehouse_id=warehouse_id,
         transaction_type="批量出库",
         quantity=quantity,
+        batch_id=batch_id,
         notes=notes or "批量出库"
     )
     db.add(combo_transaction)
@@ -1410,3 +1437,431 @@ async def _get_product_info(db: AsyncSession, product_id: Optional[int], combo_p
         }
 
     return {"name": "未知商品", "sku": "未知SKU"}
+
+
+# ========== 库存操作记录管理端点 ==========
+
+@router.get("/product-transactions", response_model=dict)
+async def get_product_inventory_transactions(
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(10, ge=1, le=100, description="每页数量"),
+    warehouse_name: Optional[str] = Query(None, description="仓库名称（模糊搜索）"),
+    product_search: Optional[str] = Query(None, description="商品名称或SKU（模糊搜索）"),
+    start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取基础商品库存操作记录列表"""
+
+    # 构建查询条件
+    query = select(InventoryTransaction).options(
+        selectinload(InventoryTransaction.product),
+        selectinload(InventoryTransaction.warehouse)
+    )
+
+    # 仓库名称模糊搜索
+    if warehouse_name:
+        query = query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+
+    # 商品名称或SKU模糊搜索
+    if product_search:
+        query = query.join(Product).where(
+            or_(
+                Product.name.contains(product_search),
+                Product.sku.contains(product_search)
+            )
+        )
+
+    # 日期范围筛选
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.where(InventoryTransaction.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="开始日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.where(InventoryTransaction.created_at < end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="结束日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    # 按创建时间倒序排列
+    query = query.order_by(InventoryTransaction.created_at.desc())
+
+    # 计算总数
+    count_query = select(func.count()).select_from(InventoryTransaction)
+
+    # 应用相同的筛选条件到计数查询
+    if warehouse_name:
+        count_query = count_query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+    if product_search:
+        count_query = count_query.join(Product).where(
+            or_(
+                Product.name.contains(product_search),
+                Product.sku.contains(product_search)
+            )
+        )
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        count_query = count_query.where(InventoryTransaction.created_at >= start_dt)
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+        count_query = count_query.where(InventoryTransaction.created_at < end_dt)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+
+    # 分页查询
+    offset = (page - 1) * size
+    query = query.offset(offset).limit(size)
+
+    result = await db.execute(query)
+    transactions = result.scalars().all()
+
+    # 转换为响应格式
+    items = []
+    for transaction in transactions:
+        items.append({
+            "id": transaction.id,
+            "product": {
+                "id": transaction.product.id,
+                "name": transaction.product.name,
+                "sku": transaction.product.sku
+            } if transaction.product else None,
+            "warehouse": {
+                "id": transaction.warehouse.id,
+                "name": transaction.warehouse.name
+            } if transaction.warehouse else None,
+            "transaction_type": transaction.transaction_type,
+            "from_status": transaction.from_status,
+            "to_status": transaction.to_status,
+            "quantity": transaction.quantity,
+            "reference_id": transaction.reference_id,
+            "batch_id": transaction.batch_id,
+            "notes": transaction.notes,
+            "created_at": transaction.created_at.isoformat() if transaction.created_at else None
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": (total + size - 1) // size
+    }
+
+
+@router.get("/combo-transactions", response_model=dict)
+async def get_combo_inventory_transactions(
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(10, ge=1, le=100, description="每页数量"),
+    warehouse_name: Optional[str] = Query(None, description="仓库名称（模糊搜索）"),
+    product_search: Optional[str] = Query(None, description="组合商品名称或SKU（模糊搜索）"),
+    start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取组合商品库存操作记录列表"""
+
+    # 构建查询条件
+    query = select(ComboInventoryTransaction).options(
+        selectinload(ComboInventoryTransaction.combo_product),
+        selectinload(ComboInventoryTransaction.warehouse)
+    )
+
+    # 仓库名称模糊搜索
+    if warehouse_name:
+        query = query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+
+    # 组合商品名称或SKU模糊搜索
+    if product_search:
+        query = query.join(ComboProduct).where(
+            or_(
+                ComboProduct.name.contains(product_search),
+                ComboProduct.sku.contains(product_search)
+            )
+        )
+
+    # 日期范围筛选
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.where(ComboInventoryTransaction.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="开始日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            query = query.where(ComboInventoryTransaction.created_at < end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="结束日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    # 按创建时间倒序排列
+    query = query.order_by(ComboInventoryTransaction.created_at.desc())
+
+    # 计算总数
+    count_query = select(func.count()).select_from(ComboInventoryTransaction)
+
+    # 应用相同的筛选条件到计数查询
+    if warehouse_name:
+        count_query = count_query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+    if product_search:
+        count_query = count_query.join(ComboProduct).where(
+            or_(
+                ComboProduct.name.contains(product_search),
+                ComboProduct.sku.contains(product_search)
+            )
+        )
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        count_query = count_query.where(ComboInventoryTransaction.created_at >= start_dt)
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+        count_query = count_query.where(ComboInventoryTransaction.created_at < end_dt)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+
+    # 分页查询
+    offset = (page - 1) * size
+    query = query.offset(offset).limit(size)
+
+    result = await db.execute(query)
+    transactions = result.scalars().all()
+
+    # 转换为响应格式
+    items = []
+    for transaction in transactions:
+        items.append({
+            "id": transaction.id,
+            "combo_product": {
+                "id": transaction.combo_product.id,
+                "name": transaction.combo_product.name,
+                "sku": transaction.combo_product.sku
+            } if transaction.combo_product else None,
+            "warehouse": {
+                "id": transaction.warehouse.id,
+                "name": transaction.warehouse.name
+            } if transaction.warehouse else None,
+            "transaction_type": transaction.transaction_type,
+            "quantity": transaction.quantity,
+            "reference_id": transaction.reference_id,
+            "batch_id": transaction.batch_id,
+            "notes": transaction.notes,
+            "created_at": transaction.created_at.isoformat() if transaction.created_at else None
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": (total + size - 1) // size
+    }
+
+
+# ========== 批量出库记录管理端点 ==========
+
+@router.get("/batch-shipping-records", response_model=dict)
+async def get_batch_shipping_records(
+    page: int = Query(1, ge=1, description="页码"),
+    size: int = Query(10, ge=1, le=100, description="每页数量"),
+    warehouse_name: Optional[str] = Query(None, description="仓库名称（模糊搜索）"),
+    start_date: Optional[str] = Query(None, description="开始日期 (YYYY-MM-DD)"),
+    end_date: Optional[str] = Query(None, description="结束日期 (YYYY-MM-DD)"),
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取批量出库记录列表"""
+
+    # 构建查询条件
+    query = select(BatchShippingRecord).options(
+        selectinload(BatchShippingRecord.warehouse),
+        selectinload(BatchShippingRecord.operator)
+    )
+
+    # 仓库名称模糊搜索
+    if warehouse_name:
+        query = query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+
+    if start_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            query = query.where(BatchShippingRecord.created_at >= start_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="开始日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    if end_date:
+        try:
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)  # 包含当天
+            query = query.where(BatchShippingRecord.created_at < end_dt)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="结束日期格式错误，请使用 YYYY-MM-DD 格式"
+            )
+
+    # 按创建时间倒序排列
+    query = query.order_by(BatchShippingRecord.created_at.desc())
+
+    # 计算总数
+    count_query = select(func.count()).select_from(BatchShippingRecord)
+    if warehouse_name:
+        count_query = count_query.join(Warehouse).where(Warehouse.name.contains(warehouse_name))
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        count_query = count_query.where(BatchShippingRecord.created_at >= start_dt)
+    if end_date:
+        end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+        count_query = count_query.where(BatchShippingRecord.created_at < end_dt)
+
+    total_result = await db.execute(count_query)
+    total = total_result.scalar()
+
+    # 分页查询
+    offset = (page - 1) * size
+    query = query.offset(offset).limit(size)
+
+    result = await db.execute(query)
+    records = result.scalars().all()
+
+    # 转换为响应格式
+    items = []
+    for record in records:
+        items.append({
+            "id": record.id,
+            "batch_id": record.batch_id,
+            "warehouse": {
+                "id": record.warehouse.id,
+                "name": record.warehouse.name
+            } if record.warehouse else None,
+            "operator": {
+                "id": record.operator.id,
+                "username": record.operator.username,
+                "email": record.operator.email
+            } if record.operator else None,
+            "total_items_count": record.total_items_count,
+            "total_quantity": record.total_quantity,
+            "notes": record.notes,
+            "created_at": record.created_at.isoformat() if record.created_at else None
+        })
+
+    return {
+        "items": items,
+        "total": total,
+        "page": page,
+        "size": size,
+        "pages": (total + size - 1) // size
+    }
+
+
+@router.get("/batch-shipping-records/{batch_id}/details")
+async def get_batch_shipping_record_details(
+    batch_id: str,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取批量出库记录详情"""
+
+    # 获取批次记录
+    batch_result = await db.execute(
+        select(BatchShippingRecord)
+        .options(
+            selectinload(BatchShippingRecord.warehouse),
+            selectinload(BatchShippingRecord.operator)
+        )
+        .where(BatchShippingRecord.batch_id == batch_id)
+    )
+    batch_record = batch_result.scalar_one_or_none()
+
+    if not batch_record:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="批量出库记录不存在"
+        )
+
+    # 获取基础商品出库明细
+    base_products_result = await db.execute(
+        select(InventoryTransaction)
+        .options(selectinload(InventoryTransaction.product))
+        .where(InventoryTransaction.batch_id == batch_id)
+        .order_by(InventoryTransaction.created_at)
+    )
+    base_transactions = base_products_result.scalars().all()
+
+    # 获取组合商品出库明细
+    combo_products_result = await db.execute(
+        select(ComboInventoryTransaction)
+        .options(selectinload(ComboInventoryTransaction.combo_product))
+        .where(ComboInventoryTransaction.batch_id == batch_id)
+        .order_by(ComboInventoryTransaction.created_at)
+    )
+    combo_transactions = combo_products_result.scalars().all()
+
+    # 构建商品明细列表
+    items = []
+
+    # 基础商品
+    for transaction in base_transactions:
+        if transaction.product:
+            items.append({
+                "product_id": transaction.product.id,
+                "combo_product_id": None,
+                "product_name": transaction.product.name,
+                "sku": transaction.product.sku,
+                "quantity": transaction.quantity,
+                "type": "product"
+            })
+
+    # 组合商品
+    for transaction in combo_transactions:
+        if transaction.combo_product:
+            items.append({
+                "product_id": None,
+                "combo_product_id": transaction.combo_product.id,
+                "product_name": transaction.combo_product.name,
+                "sku": transaction.combo_product.sku,
+                "quantity": transaction.quantity,
+                "type": "combo"
+            })
+
+    return {
+        "record": {
+            "id": batch_record.id,
+            "batch_id": batch_record.batch_id,
+            "warehouse": {
+                "id": batch_record.warehouse.id,
+                "name": batch_record.warehouse.name
+            } if batch_record.warehouse else None,
+            "operator": {
+                "id": batch_record.operator.id,
+                "username": batch_record.operator.username,
+                "email": batch_record.operator.email
+            } if batch_record.operator else None,
+            "total_items_count": batch_record.total_items_count,
+            "total_quantity": batch_record.total_quantity,
+            "notes": batch_record.notes,
+            "created_at": batch_record.created_at.isoformat() if batch_record.created_at else None
+        },
+        "items": items
+    }
