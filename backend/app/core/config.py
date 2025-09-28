@@ -22,7 +22,10 @@ class Settings(BaseSettings):
     BACKEND_CORS_ORIGINS: List[str] = [
         "http://localhost:3000",
         "http://127.0.0.1:3000",
-        "http://localhost:3001"
+        "http://localhost:3001",
+        "http://192.168.31.188:3000",  # 局域网前端地址
+        "http://192.168.31.188:3001",  # 备用端口
+        "*"  # 开发环境允许所有来源（生产环境请移除此行）
     ]
     
     # JWT配置
