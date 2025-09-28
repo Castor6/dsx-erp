@@ -458,7 +458,7 @@ export default function BatchShippingDialog({
                                 超过最大数量 {item.max_quantity}
                               </span>
                             )}
-                            {typeof item.quantity === 'number' && item.quantity <= 0 && item.quantity !== '' && (
+                            {typeof item.quantity === 'number' && item.quantity <= 0 && (
                               <span className="text-xs text-red-500">
                                 数量必须大于0
                               </span>

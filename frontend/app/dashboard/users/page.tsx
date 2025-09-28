@@ -35,17 +35,7 @@ import { zodResolver } from '@hookform/resolvers/zod'
 import { z } from 'zod'
 import { Plus, Edit, Trash2 } from 'lucide-react'
 import { api } from '@/lib/api'
-
-interface User {
-  id: number
-  username: string
-  email?: string
-  full_name?: string
-  is_active: boolean
-  is_admin: boolean
-  created_at: string
-  updated_at?: string
-}
+import { User } from '@/types'
 
 const userSchema = z.object({
   username: z.string().min(1, '请输入用户名'),
@@ -60,7 +50,7 @@ const editUserSchema = z.object({
   email: z.string().min(1, '请输入邮箱').email('请输入有效的邮箱地址'),
   full_name: z.string().min(1, '请输入姓名'),
   password: z.string().optional(),
-  is_admin: z.boolean().default(false),
+  is_admin: z.boolean().optional().default(false),
 })
 
 type UserForm = z.infer<typeof userSchema>
@@ -72,8 +62,8 @@ export default function UsersPage() {
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingUser, setEditingUser] = useState<User | null>(null)
 
-  const form = useForm<UserForm>({
-    resolver: zodResolver(editingUser ? editUserSchema : userSchema),
+  const form = useForm<UserForm | EditUserForm>({
+    resolver: zodResolver(editingUser ? editUserSchema : userSchema) as any,
     defaultValues: {
       username: '',
       email: '',
