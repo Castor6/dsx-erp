@@ -1,11 +1,9 @@
 import axios from 'axios'
+import { API_BASE_URL as CONFIG_API_URL } from '@/config/api-config'
 
 // 直接连接到后端API
-// 优先使用环境变量，否则自动检测当前主机的8000端口
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 
-  (typeof window !== 'undefined' 
-    ? `http://${window.location.hostname}:8000`
-    : 'http://localhost:8000')
+// 优先使用环境变量，否则使用配置文件中的地址
+const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || CONFIG_API_URL
 
 export const api = axios.create({
   baseURL: API_BASE_URL,
