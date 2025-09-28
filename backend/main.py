@@ -17,7 +17,7 @@ from app.core.exception_handlers import (
 )
 
 # 导入所有模型以确保它们被注册到Base.metadata
-from app.models import user, supplier, warehouse, product, purchase_order, inventory, supplier_product
+from app.models import *
 
 # 设置日志
 setup_logging()
