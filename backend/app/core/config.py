@@ -26,7 +26,7 @@ class Settings(BaseSettings):
     ]
     
     # JWT配置
-    SECRET_KEY: str = "uG5s_2bM2nYF6dKwGm1r9wQzJj7n4aX8oPq3tL9sD1vV4fYzKc6hU2eB8mQ5xR0j"
+    SECRET_KEY: str = "password"
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 30
