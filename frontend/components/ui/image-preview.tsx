@@ -62,11 +62,15 @@ export function ImagePreview({
           </button>
 
           {/* 图片容器 */}
-          <div className="flex-1 flex items-center justify-center p-8 bg-gray-50/50">
+          <div className="flex-1 flex items-center justify-center p-8 bg-gray-50/50 overflow-hidden">
             <img
               src={imageSrc}
               alt={alt}
-              className="max-w-full max-h-full object-contain rounded-lg shadow-lg"
+              className="w-full h-full object-contain rounded-lg shadow-lg"
+              style={{
+                maxWidth: 'calc(100% - 4rem)',
+                maxHeight: 'calc(100% - 4rem)'
+              }}
               onError={handleImageError}
             />
           </div>
