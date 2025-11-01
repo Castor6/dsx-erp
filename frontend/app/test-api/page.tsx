@@ -3,6 +3,7 @@
 import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { API_BASE_URL } from '@/config/api-config'
 
 export default function TestApiPage() {
   const [result, setResult] = useState<string>('')
@@ -11,7 +12,7 @@ export default function TestApiPage() {
   const testHealthCheck = async () => {
     setIsLoading(true)
     try {
-      const response = await fetch('http://localhost:8000/health')
+      const response = await fetch(`${API_BASE_URL}/health`)
       const data = await response.json()
       setResult(`Health Check成功: ${JSON.stringify(data)}`)
     } catch (error) {
@@ -28,7 +29,7 @@ export default function TestApiPage() {
       formData.append('username', 'admin')
       formData.append('password', 'admin123')
 
-      const response = await fetch('http://localhost:8000/api/v1/auth/login', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',

@@ -1,6 +1,7 @@
 "use client"
 
 import { useState } from 'react'
+import { API_BASE_URL } from '@/config/api-config'
 
 export default function SimpleLoginPage() {
   const [username, setUsername] = useState('')
@@ -17,7 +18,7 @@ export default function SimpleLoginPage() {
       formData.append('username', username)
       formData.append('password', password)
 
-      const response = await fetch('http://localhost:8000/api/v1/auth/login', {
+      const response = await fetch(`${API_BASE_URL}/api/v1/auth/login`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/x-www-form-urlencoded',
@@ -88,7 +89,7 @@ export default function SimpleLoginPage() {
         
         <div className="mt-4 text-center text-sm text-gray-500">
           <p>测试账户: admin / admin123</p>
-          <p>API地址: http://localhost:8000</p>
+          <p>API地址: {API_BASE_URL}</p>
         </div>
       </div>
     </div>

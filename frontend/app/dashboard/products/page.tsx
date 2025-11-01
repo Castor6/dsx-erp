@@ -35,6 +35,7 @@ import { api } from '@/lib/api'
 import { MultiPackagingSelector } from '@/components/ui/multi-packaging-selector'
 import { PackagingRelation, ProductPackagingRelation } from '@/types'
 import { handleApiError, validateRequiredFields, skuValidator, lengthValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
+import { API_BASE_URL } from '@/config/api-config'
 
 interface Product {
   id: number
@@ -550,7 +551,7 @@ export default function ProductsPage() {
                   {formData.image_url && !selectedFile && (
                     <div className="flex items-center gap-2">
                       <img 
-                        src={`http://localhost:8000${formData.image_url}`} 
+                        src={`${API_BASE_URL}${formData.image_url}`} 
                         alt="预览" 
                         className="w-16 h-16 object-cover rounded"
                         onError={(e) => {
@@ -655,7 +656,7 @@ export default function ProductsPage() {
                     <TableCell>
                       {product.image_url ? (
                         <img 
-                          src={`http://localhost:8000${product.image_url}`} 
+                          src={`${API_BASE_URL}${product.image_url}`} 
                           alt={product.name}
                           className="w-12 h-12 object-cover rounded"
                           onError={(e) => {
