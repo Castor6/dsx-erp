@@ -50,35 +50,29 @@ export function ImagePreview({
         </DialogTrigger>
       )}
 
-      <DialogContent className="max-w-5xl w-[95vw] h-[95vh] max-h-[95vh] p-0 overflow-hidden bg-white border-0 shadow-2xl">
-        <div className="relative w-full h-full flex flex-col">
-          {/* 右上角关闭按钮 */}
-          <button
-            onClick={() => setIsOpen(false)}
-            className="absolute top-4 right-4 z-10 rounded-full bg-white/80 backdrop-blur-sm p-2 hover:bg-white/90 transition-colors shadow-md"
-          >
-            <X className="h-5 w-5 text-gray-600" />
-            <span className="sr-only">关闭</span>
-          </button>
+      <DialogContent className="max-w-[95vw] w-[95vw] h-[95vh] p-0 gap-0 overflow-hidden bg-white border-0 shadow-2xl flex flex-col">
+        {/* 右上角关闭按钮 */}
+        <button
+          onClick={() => setIsOpen(false)}
+          className="absolute top-4 right-4 z-10 rounded-full bg-white/80 backdrop-blur-sm p-2 hover:bg-white/90 transition-colors shadow-md"
+        >
+          <X className="h-5 w-5 text-gray-600" />
+          <span className="sr-only">关闭</span>
+        </button>
 
-          {/* 图片容器 */}
-          <div className="flex-1 flex items-center justify-center p-8 bg-gray-50/50 overflow-hidden">
-            <img
-              src={imageSrc}
-              alt={alt}
-              className="w-full h-full object-contain rounded-lg shadow-lg"
-              style={{
-                maxWidth: 'calc(100% - 4rem)',
-                maxHeight: 'calc(100% - 4rem)'
-              }}
-              onError={handleImageError}
-            />
-          </div>
+        {/* 图片容器 - 占据除底部栏外的所有空间 */}
+        <div className="flex-1 flex items-center justify-center p-8 bg-gray-50/50 min-h-0">
+          <img
+            src={imageSrc}
+            alt={alt}
+            className="max-w-full max-h-full w-auto h-auto object-contain rounded-lg shadow-lg"
+            onError={handleImageError}
+          />
+        </div>
 
-          {/* 底部信息 */}
-          <div className="p-3 border-t bg-gray-50 text-center">
-            <p className="text-sm text-gray-600">{alt}</p>
-          </div>
+        {/* 底部信息 - 固定高度 */}
+        <div className="h-12 px-4 border-t bg-gray-50 flex items-center justify-center flex-shrink-0">
+          <p className="text-sm text-gray-600 truncate">{alt}</p>
         </div>
       </DialogContent>
     </Dialog>
