@@ -30,7 +30,7 @@ import {
   SelectValue,
 } from '@/components/ui/select'
 import { useToast } from '@/hooks/use-toast'
-import { Plus, ShoppingCart, Package, Trash2, Eye } from 'lucide-react'
+import { Plus, ShoppingCart, Package, Trash2, Eye, Download, Upload } from 'lucide-react'
 import { api } from '@/lib/api'
 import SearchableSelect from '@/components/ui/searchable-select'
 import { handleApiError, validateRequiredFields, validateArrayFields, lengthValidator, numberValidator, ValidationError, hasErrors, formatErrorsForToast, apiErrorToFieldError } from '@/lib/form-validation'
@@ -144,6 +144,8 @@ export default function PurchaseOrdersPage() {
   })
   const [receiveItems, setReceiveItems] = useState<{ item_id: number, received_quantity: number | string }[]>([])
   const [validationErrors, setValidationErrors] = useState<ValidationError[]>([])
+  const [isImporting, setIsImporting] = useState(false)
+  const [selectedSupplierName, setSelectedSupplierName] = useState<string>('')
   const { toast } = useToast()
 
   const fetchOrders = async (page: number = 1, size: number = 5) => {
@@ -263,6 +265,7 @@ export default function PurchaseOrdersPage() {
   const handleCloseCreateDialog = () => {
     setIsCreateDialogOpen(false)
     setValidationErrors([])
+    setSelectedSupplierName('')
     setFormData({
       supplier_id: null,
       purchaser: '',
@@ -273,12 +276,164 @@ export default function PurchaseOrdersPage() {
 
   // 处理供应商选择
   const handleSupplierChange = async (supplierId: string) => {
+    if (!supplierId) {
+      setFormData(prev => ({ 
+        ...prev, 
+        supplier_id: null,
+        items: []
+      }))
+      setSelectedSupplierName('')
+      return
+    }
+    
     const id = parseInt(supplierId)
     setFormData(prev => ({ 
       ...prev, 
       supplier_id: id,
       items: [] // 清空已选择的商品
     }))
+    
+    // 通过供应商列表API获取供应商名称
+    try {
+      const response = await api.get(`/api/v1/suppliers/?size=100`)
+      const data = response.data
+      const items = data.items || data
+      const supplier = items.find((s: Supplier) => s.id === id)
+      setSelectedSupplierName(supplier?.name || '')
+    } catch (error) {
+      setSelectedSupplierName('')
+    }
+  }
+
+  // 下载采购模板
+  const handleDownloadTemplate = async () => {
+    if (!formData.supplier_id) {
+      toast({
+        title: "提示",
+        description: "请先选择供应商",
+        variant: "destructive",
+      })
+      return
+    }
+
+    try {
+      const response = await api.get(`/api/v1/purchase-orders/template/${formData.supplier_id}/download`, {
+        responseType: 'blob'
+      })
+      
+      // 创建下载链接
+      const blob = new Blob([response.data], { 
+        type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' 
+      })
+      const url = window.URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      
+      // 从响应头获取文件名，如果没有则使用默认名称
+      let filename = selectedSupplierName ? `采购模板_${selectedSupplierName}.xlsx` : '采购模板.xlsx'
+      const contentDisposition = response.headers['content-disposition']
+      if (contentDisposition) {
+        const filenameMatch = contentDisposition.match(/filename\*=UTF-8''(.+)/)
+        if (filenameMatch) {
+          try {
+            filename = decodeURIComponent(filenameMatch[1])
+          } catch (e) {
+            // 解码失败时使用默认文件名
+          }
+        }
+      }
+      link.download = filename
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      window.URL.revokeObjectURL(url)
+      
+      toast({
+        title: "成功",
+        description: "采购模板下载成功",
+      })
+    } catch (error: any) {
+      const apiError = handleApiError(error)
+      toast({
+        title: "下载失败",
+        description: apiError.message,
+        variant: "destructive",
+      })
+    }
+  }
+
+  // 导入采购明细
+  const handleImportItems = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) return
+
+    if (!formData.supplier_id) {
+      toast({
+        title: "提示",
+        description: "请先选择供应商",
+        variant: "destructive",
+      })
+      event.target.value = ''
+      return
+    }
+
+    setIsImporting(true)
+    
+    try {
+      const formDataUpload = new FormData()
+      formDataUpload.append('file', file)
+      
+      const response = await api.post(
+        `/api/v1/purchase-orders/template/import?supplier_id=${formData.supplier_id}`,
+        formDataUpload,
+        {
+          headers: {
+            'Content-Type': 'multipart/form-data'
+          }
+        }
+      )
+      
+      const result = response.data
+      
+      if (result.imported_items && result.imported_items.length > 0) {
+        // 将导入的商品添加到表单中
+        const newItems = result.imported_items.map((item: any) => ({
+          product_id: item.product_id,
+          quantity: item.quantity,
+          unit_price: item.unit_price || ''
+        }))
+        
+        setFormData(prev => ({
+          ...prev,
+          items: [...prev.items, ...newItems]
+        }))
+        
+        toast({
+          title: "导入成功",
+          description: result.summary,
+        })
+      } else {
+        toast({
+          title: "提示",
+          description: "没有找到数量大于0的商品",
+          variant: "destructive",
+        })
+      }
+      
+      if (result.errors && result.errors.length > 0) {
+        console.warn('导入错误:', result.errors)
+      }
+    } catch (error: any) {
+      const apiError = handleApiError(error)
+      toast({
+        title: "导入失败",
+        description: apiError.message,
+        variant: "destructive",
+      })
+    } finally {
+      setIsImporting(false)
+      event.target.value = ''
+    }
   }
 
   const handleAddItem = () => {
@@ -581,16 +736,49 @@ export default function PurchaseOrdersPage() {
               <div>
                 <div className="flex items-center justify-between mb-2">
                   <Label>采购明细 *</Label>
-                  <Button 
-                    type="button" 
-                    variant="outline" 
-                    size="sm" 
-                    onClick={handleAddItem}
-                    disabled={!formData.supplier_id}
-                  >
-                    <Plus className="h-3 w-3 mr-1" />
-                    添加商品
-                  </Button>
+                  <div className="flex items-center gap-2">
+                    <Button 
+                      type="button" 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleDownloadTemplate}
+                      disabled={!formData.supplier_id}
+                    >
+                      <Download className="h-3 w-3 mr-1" />
+                      下载采购模板
+                    </Button>
+                    <label className={!formData.supplier_id || isImporting ? 'pointer-events-none' : 'cursor-pointer'}>
+                      <input
+                        type="file"
+                        accept=".xlsx,.xls"
+                        onChange={handleImportItems}
+                        className="hidden"
+                        disabled={!formData.supplier_id || isImporting}
+                      />
+                      <Button 
+                        type="button" 
+                        variant="outline" 
+                        size="sm" 
+                        disabled={!formData.supplier_id || isImporting}
+                        asChild
+                      >
+                        <span>
+                          <Upload className="h-3 w-3 mr-1" />
+                          {isImporting ? '导入中...' : '导入采购明细'}
+                        </span>
+                      </Button>
+                    </label>
+                    <Button 
+                      type="button" 
+                      variant="outline" 
+                      size="sm" 
+                      onClick={handleAddItem}
+                      disabled={!formData.supplier_id}
+                    >
+                      <Plus className="h-3 w-3 mr-1" />
+                      添加商品
+                    </Button>
+                  </div>
                 </div>
                 
                 {formData.items.length === 0 ? (

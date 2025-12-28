@@ -203,7 +203,7 @@ export default function InventoryPage() {
   
   // 对话框状态
   const [isActionDialogOpen, setIsActionDialogOpen] = useState(false)
-  const [actionType, setActionType] = useState<'package' | 'ship' | 'assemble' | 'combo-ship'>('package')
+  const [actionType, setActionType] = useState<'package' | 'ship' | 'unpack' | 'assemble' | 'combo-ship' | 'disassemble'>('package')
   const [actionForm, setActionForm] = useState<ActionForm>({
     warehouse_id: 0,
     quantity: '',
@@ -456,6 +456,15 @@ export default function InventoryPage() {
           }
           successMessage = '商品出库成功'
           break
+        case 'unpack':
+          endpoint = '/api/v1/inventory/unpack'
+          payload = {
+            product_id: actionForm.product_id,
+            warehouse_id: actionForm.warehouse_id,
+            quantity: Number(actionForm.quantity)
+          }
+          successMessage = '商品拆包成功'
+          break
         case 'assemble':
           endpoint = '/api/v1/combo-products/assemble'
           payload = {
@@ -475,6 +484,16 @@ export default function InventoryPage() {
             notes: actionForm.notes || ''
           }
           successMessage = '组合商品出库成功'
+          break
+        case 'disassemble':
+          endpoint = '/api/v1/combo-products/disassemble'
+          payload = {
+            combo_product_id: actionForm.combo_product_id,
+            warehouse_id: actionForm.warehouse_id,
+            quantity: Number(actionForm.quantity),
+            notes: actionForm.notes || ''
+          }
+          successMessage = '组合商品拆包成功'
           break
       }
 
@@ -510,7 +529,7 @@ export default function InventoryPage() {
   }
 
   const openActionDialog = async (
-    type: 'package' | 'ship' | 'assemble' | 'combo-ship',
+    type: 'package' | 'ship' | 'unpack' | 'assemble' | 'combo-ship' | 'disassemble',
     productId?: number,
     comboProductId?: number,
     warehouseId?: number
@@ -551,12 +570,20 @@ export default function InventoryPage() {
           endpoint = `/api/v1/inventory/product/${productId}/max-ship-quantity`
           params = `?warehouse_id=${targetWarehouseId}`
           break
+        case 'unpack':
+          endpoint = `/api/v1/inventory/product/${productId}/max-unpack-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
         case 'assemble':
           endpoint = `/api/v1/combo-products/${comboProductId}/max-assemble-quantity`
           params = `?warehouse_id=${targetWarehouseId}`
           break
         case 'combo-ship':
           endpoint = `/api/v1/combo-products/${comboProductId}/max-ship-quantity`
+          params = `?warehouse_id=${targetWarehouseId}`
+          break
+        case 'disassemble':
+          endpoint = `/api/v1/combo-products/${comboProductId}/max-disassemble-quantity`
           params = `?warehouse_id=${targetWarehouseId}`
           break
       }
@@ -610,8 +637,10 @@ export default function InventoryPage() {
     switch (actionType) {
       case 'package': return '商品打包'
       case 'ship': return '商品出库'
+      case 'unpack': return '商品拆包'
       case 'assemble': return '组合商品打包'
       case 'combo-ship': return '组合商品出库'
+      case 'disassemble': return '组合商品拆包'
       default: return '操作'
     }
   }
@@ -784,6 +813,15 @@ export default function InventoryPage() {
                       <Button
                         size="sm"
                         variant="outline"
+                        onClick={() => openActionDialog('unpack', record.product_id, undefined, record.warehouse_id)}
+                      >
+                        拆包
+                      </Button>
+                    )}
+                    {record.product?.sale_type === '商品' && (
+                      <Button
+                        size="sm"
+                        variant="outline"
                         onClick={() => openActionDialog('ship', record.product_id, undefined, record.warehouse_id)}
                       >
                         出库
@@ -896,6 +934,13 @@ export default function InventoryPage() {
                       onClick={() => openActionDialog('assemble', undefined, record.combo_product_id, record.warehouse_id)}
                     >
                       打包
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant="outline"
+                      onClick={() => openActionDialog('disassemble', undefined, record.combo_product_id, record.warehouse_id)}
+                    >
+                      拆包
                     </Button>
                     <Button
                       size="sm"
@@ -1192,8 +1237,10 @@ export default function InventoryPage() {
             <DialogDescription>
               {actionType === 'package' && '将半成品打包成成品（商品类型会消耗对应包材）'}
               {actionType === 'ship' && '将成品出库'}
+              {actionType === 'unpack' && '将成品拆回半成品（商品类型会恢复对应包材）'}
               {actionType === 'assemble' && '将基础商品打包成组合商品'}
               {actionType === 'combo-ship' && '将组合商品成品出库'}
+              {actionType === 'disassemble' && '将组合商品拆回基础商品半成品（恢复包材）'}
             </DialogDescription>
           </DialogHeader>
           <form onSubmit={handleAction} className="space-y-4">
@@ -1257,7 +1304,7 @@ export default function InventoryPage() {
                 </p>
               )}
             </div>
-            {(actionType === 'ship' || actionType === 'assemble' || actionType === 'combo-ship') && (
+            {(actionType === 'ship' || actionType === 'assemble' || actionType === 'combo-ship' || actionType === 'disassemble') && (
               <div>
                 <Label>备注</Label>
                 <Input

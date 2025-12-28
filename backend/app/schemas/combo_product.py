@@ -149,6 +149,14 @@ class ComboProductShipRequest(BaseModel):
     notes: Optional[str] = None
 
 
+class ComboProductDisassembleRequest(BaseModel):
+    """组合商品拆包请求"""
+    combo_product_id: int
+    warehouse_id: int  # 指定在哪个仓库拆包
+    quantity: int
+    notes: Optional[str] = None
+
+
 # 库存计算相关Schema
 class ComboInventorySummary(BaseModel):
     """组合商品库存汇总"""

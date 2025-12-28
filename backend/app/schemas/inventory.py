@@ -91,6 +91,13 @@ class ShippingRequest(BaseModel):
     notes: Optional[str] = Field(None, max_length=500, description="出库备注")
 
 
+class UnpackRequest(BaseModel):
+    """商品拆包请求"""
+    product_id: int = Field(description="商品ID")
+    warehouse_id: int = Field(description="仓库ID")
+    quantity: int = Field(gt=0, description="拆包数量必须大于0")
+
+
 class InventorySummary(BaseModel):
     """库存汇总信息"""
     warehouse_id: int

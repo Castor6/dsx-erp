@@ -15,7 +15,7 @@ from app.models.user import User
 from app.schemas.combo_product import (
     ComboProduct as ComboProductSchema, ComboProductCreate, ComboProductUpdate,
     ComboInventoryRecord as ComboInventoryRecordSchema, ComboInventorySummary,
-    ComboProductAssembleRequest, ComboProductShipRequest, ComboProductListResponse
+    ComboProductAssembleRequest, ComboProductShipRequest, ComboProductDisassembleRequest, ComboProductListResponse
 )
 
 router = APIRouter()
@@ -850,6 +850,35 @@ async def get_max_ship_quantity(
     }
 
 
+@router.get("/{combo_product_id}/max-disassemble-quantity")
+async def get_max_disassemble_quantity(
+    combo_product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取组合商品最大可拆包数量"""
+    # 获取组合商品库存
+    combo_inventory_result = await db.execute(
+        select(ComboInventoryRecord).where(
+            and_(
+                ComboInventoryRecord.combo_product_id == combo_product_id,
+                ComboInventoryRecord.warehouse_id == warehouse_id
+            )
+        )
+    )
+    combo_inventory = combo_inventory_result.scalar_one_or_none()
+
+    if not combo_inventory:
+        return {"max_quantity": 0, "limiting_factor": "库存记录不存在"}
+
+    return {
+        "max_quantity": combo_inventory.finished,
+        "limiting_factor": "成品库存",
+        "current_finished": combo_inventory.finished
+    }
+
+
 @router.post("/assemble", response_model=dict)
 async def assemble_combo_product(
     request: ComboProductAssembleRequest,
@@ -1075,6 +1104,183 @@ async def ship_combo_product(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"出库失败: {str(e)}"
+        )
+
+
+@router.post("/disassemble", response_model=dict)
+async def disassemble_combo_product(
+    request: ComboProductDisassembleRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """拆解组合商品（成品转回基础商品半成品，恢复包材）"""
+    # 获取组合商品信息
+    combo_result = await db.execute(
+        select(ComboProduct)
+        .options(
+            selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.base_product),
+            selectinload(ComboProduct.combo_items).selectinload(ComboProductItem.packaging_relations).selectinload(ComboItemPackagingRelation.packaging),
+            selectinload(ComboProduct.packaging_relations).selectinload(ComboProductPackagingRelation.packaging)
+        )
+        .where(ComboProduct.id == request.combo_product_id)
+    )
+    combo_product = combo_result.scalar_one_or_none()
+
+    if not combo_product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="组合商品不存在"
+        )
+
+    # 先检查最大可拆包数量
+    max_quantity_info = await get_max_disassemble_quantity(
+        request.combo_product_id, request.warehouse_id, db, current_user
+    )
+
+    if request.quantity > max_quantity_info["max_quantity"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"拆包数量超出限制，最大可拆包数量：{max_quantity_info['max_quantity']}，当前成品库存：{max_quantity_info['current_finished']}"
+        )
+
+    try:
+        # 1. 恢复基础商品的半成品库存和基础商品的包材
+        for item in combo_product.combo_items:
+            restore_quantity = item.quantity * request.quantity
+
+            # 获取基础商品库存
+            inventory_result = await db.execute(
+                select(InventoryRecord).where(
+                    and_(
+                        InventoryRecord.product_id == item.base_product_id,
+                        InventoryRecord.warehouse_id == request.warehouse_id
+                    )
+                )
+            )
+            base_inventory = inventory_result.scalar_one_or_none()
+
+            if not base_inventory:
+                # 如果库存记录不存在，创建一个
+                base_inventory = InventoryRecord(
+                    product_id=item.base_product_id,
+                    warehouse_id=request.warehouse_id,
+                    in_transit=0,
+                    semi_finished=0,
+                    finished=0,
+                    shipped=0
+                )
+                db.add(base_inventory)
+
+            # 恢复基础商品半成品库存
+            base_inventory.semi_finished += restore_quantity
+
+            # 恢复基础商品在此组合中配置的包材
+            if item.packaging_relations:
+                for packaging_relation in item.packaging_relations:
+                    packaging_restore = packaging_relation.quantity * restore_quantity
+
+                    # 获取包材库存
+                    packaging_inventory_result = await db.execute(
+                        select(InventoryRecord).where(
+                            and_(
+                                InventoryRecord.product_id == packaging_relation.packaging_id,
+                                InventoryRecord.warehouse_id == request.warehouse_id
+                            )
+                        )
+                    )
+                    packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+
+                    if not packaging_inventory:
+                        # 如果包材库存记录不存在，创建一个
+                        packaging_inventory = InventoryRecord(
+                            product_id=packaging_relation.packaging_id,
+                            warehouse_id=request.warehouse_id,
+                            in_transit=0,
+                            semi_finished=0,
+                            finished=0,
+                            shipped=0
+                        )
+                        db.add(packaging_inventory)
+
+                    # 恢复包材库存
+                    packaging_inventory.semi_finished += packaging_restore
+
+        # 2. 恢复组合商品本身的包材半成品库存
+        if combo_product.packaging_relations:
+            for packaging_relation in combo_product.packaging_relations:
+                packaging_restore = packaging_relation.quantity * request.quantity
+
+                # 获取包材库存
+                packaging_inventory_result = await db.execute(
+                    select(InventoryRecord).where(
+                        and_(
+                            InventoryRecord.product_id == packaging_relation.packaging_id,
+                            InventoryRecord.warehouse_id == request.warehouse_id
+                        )
+                    )
+                )
+                packaging_inventory = packaging_inventory_result.scalar_one_or_none()
+
+                if not packaging_inventory:
+                    # 如果包材库存记录不存在，创建一个
+                    packaging_inventory = InventoryRecord(
+                        product_id=packaging_relation.packaging_id,
+                        warehouse_id=request.warehouse_id,
+                        in_transit=0,
+                        semi_finished=0,
+                        finished=0,
+                        shipped=0
+                    )
+                    db.add(packaging_inventory)
+
+                # 恢复包材半成品库存
+                packaging_inventory.semi_finished += packaging_restore
+
+        # 3. 减少组合商品成品库存
+        combo_inventory_result = await db.execute(
+            select(ComboInventoryRecord).where(
+                and_(
+                    ComboInventoryRecord.combo_product_id == request.combo_product_id,
+                    ComboInventoryRecord.warehouse_id == request.warehouse_id
+                )
+            )
+        )
+        combo_inventory = combo_inventory_result.scalar_one_or_none()
+
+        if not combo_inventory or combo_inventory.finished < request.quantity:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="组合商品成品库存不足"
+            )
+
+        combo_inventory.finished -= request.quantity
+
+        # 记录库存变动
+        transaction = ComboInventoryTransaction(
+            combo_product_id=request.combo_product_id,
+            warehouse_id=request.warehouse_id,
+            transaction_type="拆包",
+            quantity=-request.quantity,
+            notes=request.notes
+        )
+        db.add(transaction)
+
+        await db.commit()
+
+        return {
+            "message": f"成功拆包 {request.quantity} 件组合商品",
+            "combo_product_name": combo_product.name,
+            "quantity": request.quantity
+        }
+
+    except HTTPException:
+        await db.rollback()
+        raise
+    except Exception as e:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"拆包失败: {str(e)}"
         )
 
 

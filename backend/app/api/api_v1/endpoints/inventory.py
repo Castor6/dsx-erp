@@ -23,6 +23,7 @@ from app.schemas.inventory import (
     InventoryTransactionCreate,
     PackagingRequest,
     ShippingRequest,
+    UnpackRequest,
     InventorySummary,
     BatchShippingRequest,
     BatchShippingResponse,
@@ -296,6 +297,33 @@ async def get_max_ship_quantity(
     }
 
 
+@router.get("/product/{product_id}/max-unpack-quantity")
+async def get_max_unpack_quantity(
+    product_id: int,
+    warehouse_id: int,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """获取基础商品最大可拆包数量"""
+    # 获取商品的成品库存
+    inventory_result = await db.execute(
+        select(InventoryRecord).where(
+            InventoryRecord.product_id == product_id,
+            InventoryRecord.warehouse_id == warehouse_id
+        )
+    )
+    inventory = inventory_result.scalar_one_or_none()
+
+    if not inventory:
+        return {"max_quantity": 0, "limiting_factor": "库存记录不存在"}
+
+    return {
+        "max_quantity": inventory.finished,
+        "limiting_factor": "成品库存",
+        "current_finished": inventory.finished
+    }
+
+
 @router.post("/package")
 async def package_products(
     request: PackagingRequest,
@@ -441,6 +469,114 @@ async def ship_products(
     await db.commit()
 
     return {"message": "出库成功", "quantity": request.quantity}
+
+
+@router.post("/unpack")
+async def unpack_products(
+    request: UnpackRequest,
+    db: AsyncSession = Depends(get_db),
+    current_user: User = Depends(get_current_active_user)
+):
+    """商品拆包（成品转半成品，恢复包材）"""
+    # 先检查最大可拆包数量
+    max_quantity_info = await get_max_unpack_quantity(
+        request.product_id, request.warehouse_id, db, current_user
+    )
+
+    if request.quantity > max_quantity_info["max_quantity"]:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"拆包数量超出限制，最大可拆包数量：{max_quantity_info['max_quantity']}，当前成品库存：{max_quantity_info['current_finished']}"
+        )
+
+    # 获取商品信息
+    result = await db.execute(
+        select(Product).where(Product.id == request.product_id)
+    )
+    product = result.scalar_one_or_none()
+
+    if not product:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="商品不存在"
+        )
+
+    # 检查是否是商品类型（需要恢复包材）
+    if product.sale_type == SaleType.PRODUCT:
+        # 查询商品的包材关系
+        packaging_relations_result = await db.execute(
+            select(ProductPackagingRelation)
+            .options(selectinload(ProductPackagingRelation.packaging))
+            .where(ProductPackagingRelation.product_id == product.id)
+        )
+        packaging_relations = packaging_relations_result.scalars().all()
+
+        # 如果有包材关系，恢复包材库存
+        if packaging_relations:
+            for relation in packaging_relations:
+                restore_quantity = relation.quantity * request.quantity
+
+                # 获取包材库存
+                packaging_result = await db.execute(
+                    select(InventoryRecord).where(
+                        InventoryRecord.product_id == relation.packaging_id,
+                        InventoryRecord.warehouse_id == request.warehouse_id
+                    )
+                )
+                packaging_inventory = packaging_result.scalar_one_or_none()
+
+                if not packaging_inventory:
+                    # 如果包材库存记录不存在，创建一个
+                    packaging_inventory = InventoryRecord(
+                        product_id=relation.packaging_id,
+                        warehouse_id=request.warehouse_id,
+                        in_transit=0,
+                        semi_finished=0,
+                        finished=0,
+                        shipped=0
+                    )
+                    db.add(packaging_inventory)
+
+                # 恢复包材半成品库存
+                packaging_inventory.semi_finished += restore_quantity
+
+                # 记录包材恢复
+                await _create_inventory_transaction(
+                    db,
+                    product_id=relation.packaging_id,
+                    warehouse_id=request.warehouse_id,
+                    transaction_type="包材恢复",
+                    from_status=None,
+                    to_status=InventoryStatus.SEMI_FINISHED,
+                    quantity=restore_quantity,
+                    notes=f"拆包商品 {product.sku} 恢复，单件恢复 {relation.quantity} 个"
+                )
+
+    # 转移商品库存：成品 -> 半成品
+    await _transfer_inventory(
+        db,
+        product_id=request.product_id,
+        warehouse_id=request.warehouse_id,
+        from_status="finished",
+        to_status="semi_finished",
+        quantity=request.quantity
+    )
+
+    # 记录库存变动
+    await _create_inventory_transaction(
+        db,
+        product_id=request.product_id,
+        warehouse_id=request.warehouse_id,
+        transaction_type="拆包",
+        from_status=InventoryStatus.FINISHED,
+        to_status=InventoryStatus.SEMI_FINISHED,
+        quantity=request.quantity,
+        notes="商品拆包完成"
+    )
+
+    await db.commit()
+
+    return {"message": "拆包成功", "quantity": request.quantity}
 
 
 @router.get("/transactions", response_model=List[InventoryTransactionWithDetails])
